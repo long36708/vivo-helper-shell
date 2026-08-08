@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<config>
+    <group title="vivo 强制安装 OTA">
+        <action title="▶ 开始强制安装" confirm="true">
+            <param name="rom" type="file" title="选择 OTA 包 (zip)" suffix="zip" />
+            <param name="downgrade" type="switch" value="true" label="强制降级 / 跨版本安装" title="强制降级 / 跨版本安装" desc="勾选后设置 ro.ota.allow_downgrade=true(需KernelSU/Magisk resetprop)绕过版本守护(vivo 错误92)" />
+            <param name="extras" type="switch" value="true" label="附带 OEM / 基带载荷" title="附带 OEM / 基带载荷" desc="勾选后自动收集 common/modem.zip、mcf_ota.zip、oem_zip/oem|dyn|vgc 等附加载荷(错误89关键)" />
+            <param name="cert" type="switch" value="true" label="证书绕过 (非官方包)" title="证书绕过 (非官方包)" desc="勾选后用 magiskboot hexpatch 把 update_engine 的 otacerts 路径改为自签证书, 仅第三方/非官方包需要" />
+            <param name="root" type="bool" title="刷完保留 ROOT" desc="开启后, 将你指定的已修补镜像写入对应分区(不再内置自动修补)" />
+            <param name="root_part" type="select" title="ROOT 分区" value="init_boot" desc="选择写入哪个分区: init_boot(默认, GKI 内核) 或 boot(非 GKI)" values="init_boot|boot" />
+            <param name="root_img" type="file" title="已修补的 ROOT 镜像" suffix="img" desc="选择已用 KernelSU/Magisk 修补好的 boot/init_boot 镜像文件, 将写入目标 slot 对应分区" />
+            <param name="reboot" type="bool" title="刷完自动重启" desc="安装完成后自动重启进入新系统" />
+            <param name="force" type="bool" title="强制重刷" desc="清空 update_engine 持久化状态后重新安装, 忽略'已应用等重启'的包(目标槽已刷过同包时可用, 否则变全量重写)" />
+            <param name="lk" type="bool" title="刷入 LK (bootloader)" desc="开启后, 将你指定的 lk 镜像写入 LK 分区(风险操作, 需镜像与机型严格匹配)" />
+            <param name="lk_img" type="file" title="LK 镜像" suffix="img" desc="选择要刷入的 lk( bootloader) 镜像文件; 多数 vivo 为独立 lk 分区, 若为 lk_a/lk_b 请用环境变量 LK_DEV 指定" />
+            <set>
+                # 转换 bool 参数为 1/0
+                case "$downgrade" in 1|true|yes|on) dg=1;; *) dg=0;; esac
+                case "$extras" in 1|true|yes|on) ex=1;; *) ex=0;; esac
+                case "$cert" in 1|true|yes|on) ce=1;; *) ce=0;; esac
+                case "$root" in 1|true|yes|on) rt=1;; *) rt=0;; esac
+                case "$reboot" in 1|true|yes|on) rb=1;; *) rb=0;; esac
+                case "$force" in 1|true|yes|on) fc=1;; *) fc=0;; esac
+                case "$lk" in 1|true|yes|on) lk=1;; *) lk=0;; esac
+                # root_part: init_boot(默认) 或 boot ; root_img: 用户选的已修补镜像路径
+                rp="${root_part:-init_boot}"
+                ri="$root_img"
+                li="$lk_img"
+                # START_DIR 为 app 私有目录根, 脚本已解压到 kr-script/ota/
+                # 参数序: rom dg ex ce rt rb fc rp ri lk li
+                sh "$START_DIR/kr-script/ota/vivo_ota.sh" "$rom" "$dg" "$ex" "$ce" "$rt" "$rb" "$fc" "$rp" "$ri" "$lk" "$li"
+            </set>
+        </action>
+    </group>
+
+    <group title="辅助">
+        <action title="查看安装进度">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh"</set>
+        </action>
+        <action title="取消当前安装">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_cancel.sh"</set>
+        </action>
+        <action title="原理说明">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_help.sh"</set>
+        </action>
+    </group>
+</config>

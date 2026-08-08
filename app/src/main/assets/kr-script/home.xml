@@ -76,4 +76,16 @@
         <page config="samples/web.xml" title="网页引擎测试" />
     </group>
 
+    <group title="vivo OTA">
+        <page config="ota/ota.xml" title="vivo 强制安装 OTA">
+            <resource dir="file:///android_asset/kr-script/ota" />
+        </page>
+    </group>
+
+    <group title="GT 玩机助手 OTA">
+        <page config="payload/payload.xml" title="GT 强制安装 OTA 包">
+            <resource dir="file:///android_asset/kr-script/payload" />
+        </page>
+    </group>
+
 </nav>

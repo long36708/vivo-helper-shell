@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<config>
+    <resource dir="file:///android_asset/kr-script/payload" />
+
+    <group title="系统更新">
+        <summary>支持官方包偷渡，降级，转换任意地区版本和第三方OTA包</summary>
+        <action interruptible="false" title="强制安装系统更新">
+            <params>
+                <param name="rom" type="file" title="ROM 文件路径" label="ROM 文件路径" suffix="zip" required="true" desc="输入 zip OTA 包绝对路径 (必填)" />
+                <param name="ChongQi" type="switch" label="自动重启系统" title="自动重启系统" desc="如果是降级，建议备份好数据再刷" />
+                <param name="boot" type="switch" label="保留系统ROOT" title="保留系统ROOT" desc="保留系统ROOT" />
+                <param name="Format" type="switch" label="格式化手机" title="格式化手机" desc="清空用户数据" />
+                <param name="fota" type="switch" value="true" label="第三方OTA包" title="第三方OTA包" desc="勾选走证书绕过(非官方/第三方包)" />
+            </params>
+            <set>
+                sh $START_DIR/kr-script/payload/ab_updater.sh "$rom" "$ChongQi" "$boot" "$Format" "$fota"
+            </set>
+        </action>
+    </group>
+
+    <group title="其他选项">
+        <action title="显示 ROM 信息" interruptible="true">
+            <set>sh $START_DIR/kr-script/payload/cat.sh</set>
+        </action>
+        <action title="退出脚本" interruptible="false">
+            <set>sh $START_DIR/kr-script/payload/exit.sh</set>
+        </action>
+        <action title="强制退出" interruptible="false">
+            <set>sh $START_DIR/kr-script/payload/quit.sh</set>
+        </action>
+    </group>
+</config>

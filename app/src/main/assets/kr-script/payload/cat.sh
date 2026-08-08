@@ -1,0 +1,1 @@
+logcat -s update_engine:v
