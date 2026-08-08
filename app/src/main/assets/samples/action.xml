@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<config>
+    <group title="基本参数类型和输入限制">
+        <action>
+            <title>单选下拉</title>
+            <param name="test">
+                <option value="1">选项 1</option>
+                <option value="2">选项 2</option>
+            </param>
+            <set>echo '数值为：' $test</set>
+        </action>
+        <action>
+            <title>单选下拉</title>
+            <desc>选项较多时，选择界面会自动调整为全屏弹窗风格</desc>
+            <param name="test" value="1">
+                <option value="1">选项 1</option>
+                <option value="2">选项 2</option>
+                <option value="3">选项 3</option>
+                <option value="4">选项 4</option>
+                <option value="5">选项 5</option>
+                <option value="6">选项 6</option>
+                <option value="7">选项 7</option>
+                <option value="8">选项 8</option>
+                <option value="9">选项 9</option>
+            </param>
+            <set>echo '数值为：' $test</set>
+        </action>
+
+        <action warn="右侧数字显示的时选中项个数">
+            <title>多选下拉</title>
+            <param name="test" label="多选下拉" multiple="multiple">
+                <option value="1">选项 1</option>
+                <option value="2">选项 2</option>
+                <option value="3">选项 3</option>
+                <option value="4">选项 4</option>
+                <option value="5">选项 5</option>
+                <option value="6">选项 6</option>
+                <option value="7">选项 7</option>
+                <option value="8">选项 8</option>
+                <option value="9">选项 9</option>
+            </param>
+            <set>echo '数值为：' $test</set>
+        </action>
+
+        <action>
+            <title>自定义多选下拉分隔符</title>
+            <param name="test" title="多选下拉" multiple="multiple" separator="@">
+                <option value="1">选项 1</option>
+                <option value="2">选项 2</option>
+                <option value="3">选项 3</option>
+            </param>
+            <set>echo '数值为：' $test</set>
+        </action>
+
+        <action>
+            <title>文本输入</title>
+            <param name="input_text" title="文本框" label="文本" value="文本喵" required="1" />
+            <param name="input_int" label="数字" max="10" min="0" type="int" value="6" required="1" />
+            <set>
+                echo '文本为：' $input_text
+                echo '数值文本为：' $input_int
+            </set>
+        </action>
+
+        <action>
+            <title>滑块输入</title>
+            <param name="input_seekbar" max="10" min="1" title="数字" type="seekbar" value="6" />
+            <set>
+                echo '滑块数值为：' $input_seekbar
+            </set>
+        </action>
+
+        <action>
+            <title>布尔输入</title>
+            <param name="input_bool" label="选框" type="bool" />
+            <param name="input_switch" label="开关" type="switch" />
+            <set>
+                echo '选框数值为：' $input_bool
+                echo '开关数值为：' $input_switch
+            </set>
+        </action>
+    </group>
+
+    <group title="文件选择">
+        <action>
+            <title>文件选择 (不限类型)</title>
+            <param name="test" label="文件选择" type="file"
+                value="/sdcard/test.txt" />
+            <set>echo '路径为：' $test</set>
+        </action>
+
+        <action>
+            <title>文件选择（.Zip）</title>
+            <param name="test" label="文件选择" type="file"
+                suffix="zip"
+                value="/sdcard/test.zip" />
+            <set>echo '路径为：' $test</set>
+        </action>
+
+        <action>
+            <title>文件选择(application/zip)</title>
+            <param name="test" label="文件选择" type="file"
+                mime="application/zip"
+                value="/sdcard/test.apk" />
+            <set>echo '路径为：' $test</set>
+        </action>
+
+        <action>
+            <title>目录选择器</title>
+            <param name="test" type="folder" value="/sdcard" />
+            <set>echo '路径为：' $test</set>
+        </action>
+
+        <action>
+            <title>允许用户编辑路径</title>
+            <desc>file、folder参数都不允许用户手动输入，除非你添加editable="true"</desc>
+            <param name="test" type="folder" value="/sdcard" editable="true" />
+            <set>echo '路径为：' $test</set>
+        </action>
+    </group>
+
+    <group title="应用选择">
+        <!--借助于type=app轻松的显示应用名称-->
+
+        <action>
+            <title>请选择一个应用</title>
+            <param name="package_name" type="app" />
+            <set>echo '包名为：' $package_name</set>
+        </action>
+
+        <action>
+            <title>请选择一个应用</title>
+            <desc>配合options-sh轻松的限制可被选择的APP</desc>
+            <param
+                name="package_name"
+                type="app"
+                options-sh="pm list package -3 | cut -f2 -d ':'" />
+            <set>echo '包名为：' $package_name</set>
+        </action>
+
+        <action>
+            <title>请选择几个应用</title>
+            <desc>也可以设置允许选择多个应用，同时还可以设置默认选中项</desc>
+            <param
+                name="package_name"
+                value="com.krscripts.app,com.android.browser"
+                separator=","
+                type="app"
+                multiple="multiple"
+                options-sh="pm list package -3 | cut -f2 -d ':'" />
+            <set>echo '包名为：' $package_name</set>
+        </action>
+
+        <action>
+            <title>包名选择器</title>
+            <desc>包名选择器(type=packages)和应用选择器(type=app)的区别在于，它会显示包含在定义的option里，但用户并未安装的应用作为选项</desc>
+            <param name="package_name" type="packages" />
+            <options>
+                <option value="android">Android 系统</option>
+                <option value="com.android.systemui">系统界面</option>
+                <option value="com.krscripts.next.plus.pro">Kr Scripts Next Plus Pro</option>
+            </options>
+            <set>echo '包名为：' $package_name</set>
+        </action>
+    </group>
+
+    <group title="颜色选择">
+        <action>
+            <title>颜色输入</title>
+            <param name="test" label="颜色输入" type="color" />
+            <set>echo '数值为：' $test</set>
+        </action>
+    </group>
+
+    <group title="输入提示">
+        <action>
+            <title>输入提示</title>
+            <param name="test" label="颜色输入" title="输入框标题" placeholder="请输入...." type="text" />
+            <set>echo '数值为：' $test</set>
+        </action>
+    </group>
+</config>

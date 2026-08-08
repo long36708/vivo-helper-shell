@@ -1,0 +1,45 @@
+package com.krscripts.core.config
+
+import android.app.Activity
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import com.krscripts.core.R
+import com.krscripts.core.executor.ScriptEnvironment
+import com.krscripts.core.model.ConfigNode
+import com.krscripts.core.model.PageNode
+import java.io.ByteArrayInputStream
+
+class PageConfigSh(private var activity: Activity, private var pageConfigSh: String, private var parentConfig: PageNode?) {
+    private var handler = Handler(Looper.getMainLooper())
+
+    private fun pageConfigShError(content: String) {
+        handler.post {
+            Toast.makeText(activity, activity.getString(R.string.kr_page_sh_invalid) + "\n" + content, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun noReadPermission() {
+        handler.post {
+            Toast.makeText(activity, activity.getString(R.string.kr_page_sh_file_permission), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun execute(): ConfigNode? {
+        var config: ConfigNode? = null
+
+        val result = ScriptEnvironment.executeResultRoot(activity, pageConfigSh, parentConfig).trim()
+        if (result.endsWith(".xml")) {
+            config = PageConfigReader(activity, result, parentConfig?.pageConfigDir).readConfigXml()
+            if (config == null) {
+                noReadPermission()
+            }
+        } else if (result.startsWith("<?xml") && result.endsWith(">")) {
+            val inputStream = ByteArrayInputStream(result.toByteArray())
+            config = PageConfigReader(activity, inputStream).readConfigXml()
+        } else if (result.isNotEmpty()) {
+            pageConfigShError(result)
+        }
+        return config
+    }
+}

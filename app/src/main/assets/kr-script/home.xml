@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<nav title="主页">
+
+    <menu>
+        <option type="default" id="1" auto-off="true" shell="hidden" confirm="true">关机</option>
+        <option type="default" id="2" auto-off="true" shell="hidden" confirm="true">软重启</option>
+        <option type="default" id="3" auto-off="true" shell="hidden" confirm="true">重启到 Recovery</option>
+        <option type="default" id="4" auto-off="true" shell="hidden" confirm="true">重启到 Bootloader</option>
+        <option type="default" id="5" auto-off="true" shell="hidden" confirm="true">重启到 Download</option>
+        <option type="default" id="6" auto-off="true" shell="hidden" confirm="true">重启到 EDL</option>
+        <handler>
+            case "$menu_id" in
+            1)
+            shutdown now
+            ;;
+            2)
+            setprop ctl.restart zygote
+            ;;
+            3)
+            reboot recovery
+            ;;
+            4)
+            reboot bootloader
+            ;;
+            5)
+            reboot download
+            ;;
+            6)
+            reboot edl
+            ;;
+            esac
+        </handler>
+    </menu>
+
+    <group title="运行环境测试">
+        <page config="samples/env/env.xml" title="环境测试">
+            <resource dir="file:///android_asset/samples/env" />
+        </page>
+    </group>
+
+    <group title="节点">
+        <page config="samples/action.xml" title="Action（动作）" />
+        <page config="samples/switch.xml" title="Switch（开关）" />
+        <page config="samples/picker.xml" title="Picker（选择）" />
+        <page config="samples/page.xml" title="Page（页面）" />
+        <page config="samples/text.xml" title="Text（文字）" />
+    </group>
+
+    <group title="属性">
+        <page config="samples/shortcut.xml" title="快捷方式" />
+        <page config="samples/reload.xml" title="节点刷新" />
+        <page config="samples/bg_task/bg_task.xml" title="后台任务" />
+        <page config="samples/limit.xml" title="功能限制" />
+        <page config="samples/icons.xml" title="图标与图片" />
+        <action title="控制进度条">
+            <script>
+                echo progress:[0/100]
+                echo 第一步
+                sleep 1
+                echo progress:[13/100]
+                echo 第二步
+                sleep 1
+                echo progress:[66/100]
+                echo 第三步
+                sleep 1
+                echo progress:[85/100]
+                echo 最后一步
+                sleep 1
+                echo 好了
+                echo progress:[100/100]
+            </script>
+        </action>
+    </group>
+
+    <group title="Web引擎">
+        <page config="samples/web.xml" title="网页引擎测试" />
+    </group>
+
+</nav>

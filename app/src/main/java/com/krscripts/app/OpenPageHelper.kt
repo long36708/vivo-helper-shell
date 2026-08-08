@@ -1,0 +1,38 @@
+package com.krscripts.app
+
+import android.app.Activity
+import android.content.Intent
+import android.widget.Toast
+import com.krscripts.core.model.PageNode
+
+class OpenPageHelper(private var activity: Activity) {
+    fun openPage(pageNode: PageNode) {
+        try {
+            val intent = when {
+                pageNode.onlineHtmlPage.isNotEmpty() -> {
+                    Intent(activity, ActionPageOnline::class.java)
+                        .putExtra("config", pageNode.onlineHtmlPage)
+                }
+
+                pageNode.pageConfigSh.isNotEmpty() -> {
+                    Intent(activity, ActionPage::class.java)
+                }
+
+                pageNode.pageConfigPath.isNotEmpty() -> {
+                    Intent(activity, ActionPage::class.java)
+                }
+
+                else -> null
+            }
+
+            intent?.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra("page", pageNode)
+            }
+
+            activity.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(activity, e.message, Toast.LENGTH_SHORT).show()
+        }
+    }
+}

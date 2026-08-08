@@ -1,0 +1,28 @@
+package com.krscripts.core.model
+
+
+/*
+示例1： 用于Spinner
+ArrayAdapter(context, R.layout.kr_spinner_default, R.id.text, options).apply {
+    setDropDownViewResource(R.layout.kr_spinner_dropdown)
+}
+*/
+
+class SelectItem {
+    var icon: String? = null
+    var iconClip: String? = null
+    var title: String? = null
+    // var desc: String = ""
+    var value: String? = null
+    var selected: Boolean = false
+
+    override fun toString(): String {
+        return if (!title.isNullOrEmpty()) {
+            title!!
+        } else if (!value.isNullOrEmpty()) {
+            value!!
+        } else {
+            "" // super.toString()
+        }
+    }
+}
