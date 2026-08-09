@@ -8,6 +8,8 @@
         <option type="default" id="4" auto-off="true" shell="hidden" confirm="true">重启到 Bootloader</option>
         <option type="default" id="5" auto-off="true" shell="hidden" confirm="true">重启到 Download</option>
         <option type="default" id="6" auto-off="true" shell="hidden" confirm="true">重启到 EDL</option>
+        <option type="default" id="7" auto-off="true" shell="hidden" confirm="true">重启到 Fastbootd</option>
+        <option type="default" id="8" auto-off="true" shell="hidden" confirm="true">重启到另一卡槽</option>
         <handler>
             case "$menu_id" in
             1)
@@ -28,53 +30,21 @@
             6)
             reboot edl
             ;;
+            7)
+            reboot fastboot
+            ;;
+            8)
+            cur=$(bootctl get-active-boot-slot)
+            if [ "$cur" = "0" ]; then
+                bootctl set-active-boot-slot 1
+            else
+                bootctl set-active-boot-slot 0
+            fi
+            reboot
+            ;;
             esac
         </handler>
     </menu>
-
-    <group title="运行环境测试">
-        <page config="samples/env/env.xml" title="环境测试">
-            <resource dir="file:///android_asset/samples/env" />
-        </page>
-    </group>
-
-    <group title="节点">
-        <page config="samples/action.xml" title="Action（动作）" />
-        <page config="samples/switch.xml" title="Switch（开关）" />
-        <page config="samples/picker.xml" title="Picker（选择）" />
-        <page config="samples/page.xml" title="Page（页面）" />
-        <page config="samples/text.xml" title="Text（文字）" />
-    </group>
-
-    <group title="属性">
-        <page config="samples/shortcut.xml" title="快捷方式" />
-        <page config="samples/reload.xml" title="节点刷新" />
-        <page config="samples/bg_task/bg_task.xml" title="后台任务" />
-        <page config="samples/limit.xml" title="功能限制" />
-        <page config="samples/icons.xml" title="图标与图片" />
-        <action title="控制进度条">
-            <script>
-                echo progress:[0/100]
-                echo 第一步
-                sleep 1
-                echo progress:[13/100]
-                echo 第二步
-                sleep 1
-                echo progress:[66/100]
-                echo 第三步
-                sleep 1
-                echo progress:[85/100]
-                echo 最后一步
-                sleep 1
-                echo 好了
-                echo progress:[100/100]
-            </script>
-        </action>
-    </group>
-
-    <group title="Web引擎">
-        <page config="samples/web.xml" title="网页引擎测试" />
-    </group>
 
     <group title="vivo OTA">
         <page config="ota/ota.xml" title="vivo 强制安装 OTA">
@@ -86,6 +56,70 @@
         <page config="payload/payload.xml" title="GT 强制安装 OTA 包">
             <resource dir="file:///android_asset/kr-script/payload" />
         </page>
+    </group>
+
+    <group title="快捷工具">
+        <action title="打开版本测试 (*#225#)">
+            <desc>快速查看手机详细版本信息：型号、软件版本号、VGC 版本、编译时间等</desc>
+            <script>
+                am start -a android.intent.action.DIAL -d "tel:*%23225%23"
+            </script>
+        </action>
+
+        <action title="设备状态检查">
+            <desc>查看当前是否已获取 Root 权限，以及 A/B 分区当前激活的槽位</desc>
+            <script>
+                echo "===== Root 权限检查 ====="
+                if [ "$(id -u)" -eq 0 ] || command -v su &gt;/dev/null 2&gt;&amp;1; then
+                    if su -c "id -u" &gt;/dev/null 2&gt;&amp;1; then
+                        echo "Root: 已获取 (uid=$(su -c 'id -u'))"
+                    else
+                        echo "Root: su 存在但未授权"
+                    fi
+                else
+                    echo "Root: 未获取"
+                fi
+
+                echo ""
+                echo "===== A/B 分区激活槽位 ====="
+                # 优先从多种属性读取当前激活槽后缀 (_a / _b)
+                suffix=""
+                for p in ro.boot.slot_suffix ro.vendor.boot.slot_suffix ro.boot.slot; do
+                    v=$(getprop "$p" 2&gt;/dev/null)
+                    if [ -n "$v" ]; then
+                        suffix="$v"
+                        break
+                    fi
+                done
+
+                if [ -z "$suffix" ]; then
+                    # 尝试 bootctl（普通 shell 与 root 两种情况）
+                    cur=""
+                    if command -v bootctl &gt;/dev/null 2&gt;&amp;1; then
+                        cur=$(bootctl get-active-boot-slot 2&gt;/dev/null)
+                    fi
+                    if [ -z "$cur" ] &amp;&amp; command -v su &gt;/dev/null 2&gt;&amp;1; then
+                        cur=$(su -c "bootctl get-active-boot-slot" 2&gt;/dev/null)
+                    fi
+                    if [ -n "$cur" ]; then
+                        slot_name=$([ "$cur" = "0" ] &amp;&amp; echo "_a" || ([ "$cur" = "1" ] &amp;&amp; echo "_b" || echo ""))
+                        echo "当前激活槽位: slot $cur ${slot_name}"
+                        case "$cur" in
+                        0) echo "另一个槽位: slot 1 (_b)" ;;
+                        1) echo "另一个槽位: slot 0 (_a)" ;;
+                        esac
+                    else
+                        echo "未检测到 A/B 分区信息 (可能为单分区设备)"
+                    fi
+                else
+                    echo "当前激活槽位后缀: $suffix"
+                    case "$suffix" in
+                    *_a) echo "对应槽位: slot 0 (_a)，另一个为 slot 1 (_b)" ;;
+                    *_b) echo "对应槽位: slot 1 (_b)，另一个为 slot 0 (_a)" ;;
+                    esac
+                fi
+            </script>
+        </action>
     </group>
 
 </nav>

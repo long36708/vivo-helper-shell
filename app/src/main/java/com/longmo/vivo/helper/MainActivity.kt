@@ -2,12 +2,16 @@ package com.longmo.vivo.helper
 
 import android.content.ComponentName
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuItem
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.UnderlineSpan
 import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.content.ContextCompat
@@ -233,7 +237,15 @@ class MainActivity : KrActivity() {
                 }
 
                 val tvAppVersion = layout.findViewById<TextView>(R.id.tv_app_version)
-                tvAppVersion.text = getString(R.string.app_version, appVersion)
+                tvAppVersion.text = getString(R.string.app_version, appVersion, BuildConfig.BUILD_COMMIT)
+
+                val tvAppAuthor = layout.findViewById<TextView>(R.id.tv_app_author)
+                tvAppAuthor.text = SpannableString(getString(R.string.app_author)).apply {
+                    setSpan(UnderlineSpan(), 0, length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+                }
+                tvAppAuthor.setOnClickListener {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.coolapk.com/u/922815")))
+                }
 
                 val frameworkVersion = BuildConfig.FRAMEWORK_VERSION
                 val tvFrameworkInfo = layout.findViewById<TextView>(R.id.tv_framework_info)

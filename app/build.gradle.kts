@@ -24,6 +24,7 @@ android {
         versionCode = gitCommitCount()
         versionName = appVersionName
         buildConfigField("String", "FRAMEWORK_VERSION", "\"$appVersionName\"")
+        buildConfigField("int", "BUILD_COMMIT", gitCommitCount().toString())
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

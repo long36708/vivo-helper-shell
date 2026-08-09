@@ -18,7 +18,7 @@
 
     <string name="framework_author">作者: 嘟嘟ski, buylan\n贡献者: MT启明星</string>
     <string name="framework_info">框架: Kr Script Next v%1$s</string>
-    <string name="app_version">v%1$s</string>
-    <string name="app_author"><![CDATA[应用作者: <名称>]]></string>
+    <string name="app_version">v%1$s (%2$d)</string>
+    <string name="app_author"><![CDATA[应用作者: 酷安 @矜持]]></string>
     <string name="title_about">关于</string>
 </resources>

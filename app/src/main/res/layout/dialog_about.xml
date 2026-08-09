@@ -37,11 +37,16 @@
         android:textAppearance="@style/TextAppearance.Material3.BodySmall.Emphasized" />
 
     <TextView
+        android:id="@+id/tv_app_author"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center"
         android:layout_marginTop="11dp"
-        android:text="@string/app_author" />
+        android:text="@string/app_author"
+        android:textColor="?colorPrimary"
+        android:textColorLink="?colorPrimary"
+        android:autoLink="web"
+        android:linksClickable="true" />
 
     <View
         android:layout_width="match_parent"
