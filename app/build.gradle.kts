@@ -2,19 +2,28 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+val appId = "com.longmo.vivo.helper.shell.app"
+val appVersionName = "0.1.0"
+
+fun gitCommitCount(): Int {
+    return providers.exec {
+        commandLine("git", "rev-list", "--count", "HEAD")
+    }.standardOutput.asText.get().trim().toIntOrNull() ?: 1
+}
+
 android {
-    namespace = "com.krscripts.app"
+    namespace = appId
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.krscripts.app"
+        applicationId = appId
         minSdk = 23
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
-        buildConfigField("String", "FRAMEWORK_VERSION", "\"0.1.0\"")
+        versionCode = gitCommitCount()
+        versionName = appVersionName
+        buildConfigField("String", "FRAMEWORK_VERSION", "\"$appVersionName\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -34,6 +43,16 @@ android {
     buildFeatures {
         viewBinding = true
         buildConfig = true
+    }
+
+    androidComponents {
+        onVariants(selector().all()) { variant ->
+            val baseName = "${appId}-v${appVersionName}(${gitCommitCount()})"
+            variant.outputs.forEach { output ->
+                (output as com.android.build.api.variant.impl.VariantOutputImpl).outputFileName =
+                    "$baseName-${variant.name}.apk"
+            }
+        }
     }
 }
 

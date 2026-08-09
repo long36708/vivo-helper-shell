@@ -18,4 +18,4 @@
 
 -keepclassmembers class * implements java.io.Serializable{*;}
 
--keep class com.krscripts.core.model.**{*;}
+-keep class com.longmo.vivo.helper.shell.core.model.**{*;}
