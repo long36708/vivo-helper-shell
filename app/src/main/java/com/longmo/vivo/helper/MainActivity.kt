@@ -1,4 +1,4 @@
-package com.krscripts.app
+package com.longmo.vivo.helper
 
 import android.content.ComponentName
 import android.content.Intent
@@ -20,8 +20,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import androidx.viewpager2.widget.ViewPager2
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.krscripts.app.databinding.ActivityMainBinding
-import com.krscripts.app.util.chooseFilePath
+import com.longmo.vivo.helper.databinding.ActivityMainBinding
+import com.longmo.vivo.helper.util.chooseFilePath
 import com.krscripts.core.config.PageConfigReader
 import com.krscripts.core.config.PageConfigSh
 import com.krscripts.core.model.ClickableNode

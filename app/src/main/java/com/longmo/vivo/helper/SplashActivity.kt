@@ -1,4 +1,4 @@
-package com.krscripts.app
+package com.longmo.vivo.helper
 
 import android.annotation.SuppressLint
 import android.app.Activity
@@ -13,7 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.krscripts.app.databinding.ActivitySplashBinding
+import com.longmo.vivo.helper.databinding.ActivitySplashBinding
 import com.krscripts.core.executor.ScriptEnvironment
 import com.krscripts.core.shell.KeepShellPublic
 import com.krscripts.core.shell.ShellExecutor

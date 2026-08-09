@@ -1,4 +1,4 @@
-package com.krscripts.app
+package com.longmo.vivo.helper
 
 import android.content.Intent
 import android.os.Bundle
@@ -11,8 +11,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import com.krscripts.app.databinding.ActivityFileSelectorBinding
-import com.krscripts.app.ui.AdapterFileSelector
+import com.longmo.vivo.helper.databinding.ActivityFileSelectorBinding
+import com.longmo.vivo.helper.ui.AdapterFileSelector
 import com.krscripts.core.ui.ProgressBarDialog
 import com.krscripts.core.util.PermissionUtil.checkAccessFiles
 import com.krscripts.core.util.PermissionUtil.requestAccessFilesDialog

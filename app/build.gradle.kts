@@ -2,7 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
-val appId = "com.longmo.vivo.helper.shell.app"
+val appId = "com.longmo.vivo.helper"
 val appVersionName = "0.1.0"
 
 fun gitCommitCount(): Int {

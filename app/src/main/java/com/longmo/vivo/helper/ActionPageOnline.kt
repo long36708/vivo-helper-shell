@@ -1,4 +1,4 @@
-package com.krscripts.app
+package com.longmo.vivo.helper
 
 import android.annotation.SuppressLint
 import android.app.DownloadManager
@@ -28,9 +28,9 @@ import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.krscripts.app.databinding.ActivityActionPageOnlineBinding
-import com.krscripts.app.util.chooseFilePath
-import com.krscripts.app.util.handleFileSelectorResult
+import com.longmo.vivo.helper.databinding.ActivityActionPageOnlineBinding
+import com.longmo.vivo.helper.util.chooseFilePath
+import com.longmo.vivo.helper.util.handleFileSelectorResult
 import com.krscripts.core.R
 import com.krscripts.core.WebViewInjector
 import com.krscripts.core.downloader.Downloader
@@ -77,7 +77,7 @@ class ActionPageOnline : KrActivity() {
         }
 
         setSupportActionBar(binding.toolbar)
-        setTitle(com.krscripts.app.R.string.app_name)
+        setTitle(com.longmo.vivo.helper.R.string.app_name)
 
         supportActionBar!!.setHomeButtonEnabled(true)
         supportActionBar!!.setDisplayHomeAsUpEnabled(true)

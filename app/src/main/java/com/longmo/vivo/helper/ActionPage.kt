@@ -1,4 +1,4 @@
-package com.krscripts.app
+package com.longmo.vivo.helper
 
 import android.content.ComponentName
 import android.content.Intent
@@ -11,8 +11,8 @@ import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
-import com.krscripts.app.databinding.ActivityActionPageBinding
-import com.krscripts.app.util.chooseFilePath
+import com.longmo.vivo.helper.databinding.ActivityActionPageBinding
+import com.longmo.vivo.helper.util.chooseFilePath
 import com.krscripts.core.R
 import com.krscripts.core.TryOpenActivity
 import com.krscripts.core.config.PageConfigReader
@@ -70,7 +70,7 @@ open class ActionPage : KrActivity() {
         }
 
         setSupportActionBar(binding.toolbar)
-        setTitle(com.krscripts.app.R.string.app_name)
+        setTitle(com.longmo.vivo.helper.R.string.app_name)
 
         supportActionBar!!.setHomeButtonEnabled(true)
         supportActionBar!!.setDisplayHomeAsUpEnabled(true)
@@ -284,7 +284,7 @@ open class ActionPage : KrActivity() {
                             autoRunTask
                         )
                         supportFragmentManager.beginTransaction()
-                            .replace(com.krscripts.app.R.id.main_list, fragment)
+                            .replace(com.longmo.vivo.helper.R.id.main_list, fragment)
                             .commitAllowingStateLoss()
                         hideDialog()
                         actionsLoaded = true

@@ -1,11 +1,11 @@
-package com.krscripts.app.util
+package com.longmo.vivo.helper.util
 
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
-import com.krscripts.app.ActivityFileSelector
+import com.longmo.vivo.helper.ActivityFileSelector
 import com.krscripts.core.shared.FilePathResolver
 import com.krscripts.core.ui.ParamsFileChooserRender
 

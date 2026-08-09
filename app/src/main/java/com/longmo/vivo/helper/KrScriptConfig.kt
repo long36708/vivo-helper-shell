@@ -1,4 +1,4 @@
-package com.krscripts.app
+package com.longmo.vivo.helper
 
 import android.content.Context
 import com.krscripts.core.executor.ScriptEnvironment

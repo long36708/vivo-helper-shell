@@ -1,7 +1,7 @@
 <resources>
     <string name="kr_script_config">kr-script.conf</string>
 
-    <string name="app_name">Kr Scripts</string>
+    <string name="app_name">Vivo助手</string>
     <string name="btn_exit">退出</string>
     <string name="please_wait">请稍等</string>
     <string name="copy_success">复制成功</string>

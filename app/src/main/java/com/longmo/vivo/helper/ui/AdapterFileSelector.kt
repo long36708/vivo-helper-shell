@@ -1,4 +1,4 @@
-package com.krscripts.app.ui
+package com.longmo.vivo.helper.ui
 
 import android.os.Handler
 import android.os.Looper
@@ -10,7 +10,7 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import com.google.android.material.snackbar.Snackbar
-import com.krscripts.app.R
+import com.longmo.vivo.helper.R
 import com.krscripts.core.ui.DialogHelper
 import com.krscripts.core.ui.ProgressBarDialog
 import java.io.File

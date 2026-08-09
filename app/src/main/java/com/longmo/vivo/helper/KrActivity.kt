@@ -1,4 +1,4 @@
-package com.krscripts.app
+package com.longmo.vivo.helper
 
 import android.content.Intent
 import android.view.MenuItem
@@ -7,8 +7,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.floatingactionbutton.FloatingActionButton
-import com.krscripts.app.util.chooseFilePath
-import com.krscripts.app.util.handleFileSelectorResult
+import com.longmo.vivo.helper.util.chooseFilePath
+import com.longmo.vivo.helper.util.handleFileSelectorResult
 import com.krscripts.core.HiddenTaskThread
 import com.krscripts.core.R
 import com.krscripts.core.config.IconPathAnalysis
