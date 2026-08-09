@@ -26,6 +26,24 @@
                 rp="${root_part:-init_boot}"
                 ri="$root_img"
                 li="$lk_img"
+                # ---------- 危险提示: 未勾选 LK 且未选择 LK 镜像 ----------
+                # 部分 vivo 机型若不刷入与当前固件匹配的 LK (bootloader), 安装后可能因
+                # bootloader 与系统/分区不匹配而无法开机甚至变砖。故在确定后、执行前
+                # 给出醒目警告, 建议先刷一个与当前固件版本相同的刷机包。
+                if [ "$lk" != "1" ] || [ -z "$li" ]; then
+                  C_RED=$(printf '\033[31m'); C_YEL=$(printf '\033[33m'); C_RST=$(printf '\033[0m')
+                  warn() { printf '%s%s%s\n' "$C_RED" "$*" "$C_RST"; }
+                  echo "============================================================"
+                  warn "  ⚠⚠⚠ 危险警告: 你未勾选『刷入 LK』且未选择 LK 镜像!"
+                  warn "  部分 vivo 机型不刷 LK 可能导致 bootloader 不匹配、无法开机甚至变砖!"
+                  printf '%s  建议: 先刷入一个与当前固件版本相同的官方刷机包, 确保 LK 一致后再操作。%s\n' "$C_YEL" "$C_RST"
+                  warn "  如确认当前 OTA 包已包含正确 bootloader, 可忽略此警告, 安装将继续。"
+                  echo "============================================================"
+                  # 同步写入镜像日志, 便于事后追溯
+                  if [ -w /sdcard ] || mountpoint -q /sdcard 2>/dev/null; then
+                    echo "[vivo_ota] 警告: 未勾选 LK 且未选择 LK 镜像, 存在变砖风险 ($(date '+%F %T'))" >> /sdcard/ota.log 2>/dev/null
+                  fi
+                fi
                 # START_DIR 为 app 私有目录根, 脚本已解压到 kr-script/ota/
                 # 参数序: rom dg ex ce rt rb fc rp ri lk li
                 sh "$START_DIR/kr-script/ota/vivo_ota.sh" "$rom" "$dg" "$ex" "$ce" "$rt" "$rb" "$fc" "$rp" "$ri" "$lk" "$li"
@@ -34,8 +52,17 @@
     </group>
 
     <group title="辅助">
-        <action title="查看安装进度">
+        <action title="状态快照 (推荐)" desc="一次性查询引擎状态+最近进度后立即退出, 不常驻后台">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" status</set>
+        </action>
+        <action title="查看安装进度 (实时监听)" desc="持续跟随最新日志并自动跟随引擎轮转; 已有实例时不会重复启动, 结束请用『停止进度监听』">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh"</set>
+        </action>
+        <action title="停止进度监听">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" stop</set>
+        </action>
+        <action title="历史进度日志列表" desc="列出全部历史日志与失败归档, 便于取消后回看">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" list</set>
         </action>
         <action title="取消当前安装">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_cancel.sh"</set>

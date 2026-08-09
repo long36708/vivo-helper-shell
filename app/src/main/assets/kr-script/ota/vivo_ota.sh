@@ -119,8 +119,9 @@ done
 TESTCERTS=/data/fuck_oddo_ota_testcerts.zip
 
 # ---------- 工具函数 ----------
-log() { echo "[vivo_ota] $*"; }
-die() { echo "FAILED: $*"; exit 1; }
+# 注意: log()/die() 已在文件头部定义(带 ANSI 着色 + /sdcard/ota.log 纯文本镜像)。
+# 此处曾重复定义为裸 echo 版本, 会覆盖前面的实现, 导致从这一行往后的所有日志
+# 既没有颜色、也不再写入镜像文件。故删除重复定义, 统一复用头部版本。
 
 # 小端读取 zip 本地头中的 2/4 字节整型
 le2() { local f="$1" o="$2" b; b=$(dd if="$f" bs=1 skip="$o" count=2 2>/dev/null | od -A n -t u1 | tr -s ' '); set -- $b; echo $(( ${1:-0} + ${2:-0}*256 )); }
@@ -339,6 +340,16 @@ if [ "$4" = "1" ]; then
   fi
 fi
 
+# ---------- 5.5 温控绕过 (update_engine 错误码9 / thermal detection) ----------
+# update_engine 安装开始前检测板温(/sys/class/thermal/thermal_zone*), 默认阈值 46000 mC=46C
+# (thermal_utils.cpp: Use default config 46000)。安装时 CPU 满载升温极易触发 kOverHeat 中止
+# (错误码9: Finish update, exit thermal detection)。
+# vivo 官方调试口: 属性 vota.virtual_ab.debug.thermal_threshold 可覆盖阈值(单位 mC),
+# 读到该属性则用之, 否则回退默认 46000。有 root 直接拉高到 120C 避免温控中途掐断。
+# 属性非 persist, 重启后失效, 故每次安装前自动设置。
+setprop vota.virtual_ab.debug.thermal_threshold 120000 2>/dev/null
+log "温控绕过: vota.virtual_ab.debug.thermal_threshold=$(getprop vota.virtual_ab.debug.thermal_threshold 2>/dev/null) (默认46C已拉高到120C)"
+
 # ---------- 6. 当前 slot ----------
 CUR_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null || echo "_a")
 TARGET_SLOT=$( [ "$CUR_SLOT" = "_a" ] && echo "_b" || echo "_a" )
@@ -446,29 +457,89 @@ FORCE_REFRESH=0
 
 # vivo 的 update_engine 是后台 daemon, 进度不回显到终端, 只落盘到:
 #   /logdata/recovery/update_engine_log/update_engine.*
-# 为实时展示进度, 安装期间后台 tail -F 该日志转发到终端(着色)并纯文本镜像; 安装结束后停掉。
+# 为实时展示进度, 安装期间后台轮询该日志目录并把增量转发到终端(着色)+纯文本镜像; 安装结束后停掉。
 UE_LOG_DIR=/logdata/recovery/update_engine_log
+UE_ERR_DIR=/logdata/recovery/update_engine_log_err
 UE_TAIL_PID=0
+
+# 为什么不用 tail -F:
+#   `tail -F "$UE_LOG_DIR"/update_engine.*` 会被 shell 在启动瞬间把通配符展开成
+#   "当时已存在的文件列表", tail 只跟随这些文件。而 attempt_install 里会先
+#   pkill update_engine 再 ctl.start 重新拉起 daemon, 引擎随即新建
+#   update_engine.<新时间戳>.<n> —— 新文件不在列表内, 永远不会被跟随, 进度直接断流。
+#   即使只 tail 单个 latest 文件, 安装中途引擎再次轮转日志同样会断。
+#   故改为: 后台子进程按固定间隔轮询"当前最新文件 + 已读偏移", 增量输出,
+#   文件轮转/截断都能正确跟随。
 start_ue_log_tail() {
-  if [ -d "$UE_LOG_DIR" ] && command -v tail >/dev/null 2>&1; then
-    # 最新那份日志文件(按 mtime), 不存在时 tail 会等待后续创建
-    local latest target
-    latest=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
-    if [ -n "$latest" ]; then
-      target="$latest"
-    else
-      target="$UE_LOG_DIR/update_engine.*"
-    fi
-    # 终端实时着色 + 纯文本镜像到 $UE_MIRROR (color_stream 已处理双写)
-    tail -F "$target" 2>/dev/null | color_stream &
-    log "已开启 update_engine 日志实时转发(着色)并镜像到 $UE_MIRROR (tail -F $target)"
-    UE_TAIL_PID=$!
-  else
+  if [ ! -d "$UE_LOG_DIR" ]; then
     log "  ⚠ 未找到 $UE_LOG_DIR, 无法实时转发进度(可手动 cat 查看)"
+    return 0
   fi
+  (
+    # dd bs=1 是逐字节 read(), 安装高峰期引擎一次写几十 KB 会跟不上;
+    # 优先用 tail -c +N (toybox 支持, N 为 1-based 字节起点) 一次取走增量。
+    tail_c_ok=0
+    printf 'ab' | tail -c +2 2>/dev/null | grep -q 'b' 2>/dev/null && tail_c_ok=1
+    emit() { # emit <file> <from> <count>
+      if [ "$tail_c_ok" = "1" ]; then
+        tail -c +$(( $2 + 1 )) "$1" 2>/dev/null | color_stream
+      else
+        dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | color_stream
+      fi
+    }
+    cur=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+    off=0
+    # 已存在的日志从当前末尾开始跟, 避免把历史内容整份回放到安装输出里
+    [ -n "$cur" ] && off=$(stat -c %s "$cur" 2>/dev/null || echo 0)
+    err_seen=""
+    [ -d "$UE_ERR_DIR" ] && err_seen=$(ls "$UE_ERR_DIR" 2>/dev/null | tr '\n' ' ')
+    while true; do
+      new=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+      # 引擎轮转出新日志: 先收干旧文件尾巴, 再切到新文件
+      if [ -n "$new" ] && [ "$new" != "$cur" ]; then
+        if [ -n "$cur" ] && [ -f "$cur" ]; then
+          end=$(stat -c %s "$cur" 2>/dev/null || echo 0)
+          cnt=$((end - off))
+          [ "$cnt" -gt 0 ] 2>/dev/null && emit "$cur" "$off" "$cnt"
+        fi
+        cur="$new"; off=0
+        printf '%s---- 引擎已轮转日志, 切换跟随: %s ----%s\n' "$C_BLU" "$cur" "$C_RST"
+        [ "$UE_LOG_WRITABLE" = "1" ] && echo "---- 引擎已轮转日志, 切换跟随: $cur ----" >> "$UE_MIRROR"
+      fi
+      # 增量读取当前文件
+      if [ -n "$cur" ] && [ -f "$cur" ]; then
+        size=$(stat -c %s "$cur" 2>/dev/null || echo 0)
+        [ "$size" -lt "$off" ] 2>/dev/null && off=0   # 被截断则从头再读
+        cnt=$((size - off))
+        [ "$cnt" -gt 0 ] 2>/dev/null && emit "$cur" "$off" "$cnt"
+        off="$size"
+      fi
+      # 失败归档目录出现新文件 -> 立即提示(引擎失败时关键细节写在这里)
+      if [ -d "$UE_ERR_DIR" ]; then
+        for f in $(ls "$UE_ERR_DIR" 2>/dev/null); do
+          case " $err_seen " in
+            *" $f "*) ;;
+            *)
+              printf '%s⚠ 引擎写出新的失败归档: %s/%s%s\n' "$C_RED" "$UE_ERR_DIR" "$f" "$C_RST"
+              [ "$UE_LOG_WRITABLE" = "1" ] && echo "⚠ 引擎写出新的失败归档: $UE_ERR_DIR/$f" >> "$UE_MIRROR"
+              err_seen="$err_seen $f"
+              ;;
+          esac
+        done
+      fi
+      sleep 2
+    done
+  ) &
+  UE_TAIL_PID=$!
+  log "已开启 update_engine 日志实时转发(着色, 自动跟随轮转)并镜像到 $UE_MIRROR"
 }
 stop_ue_log_tail() {
-  [ "$UE_TAIL_PID" -ne 0 ] 2>/dev/null && kill "$UE_TAIL_PID" 2>/dev/null
+  if [ "$UE_TAIL_PID" -ne 0 ] 2>/dev/null; then
+    kill "$UE_TAIL_PID" 2>/dev/null
+    # 收尾: 等一拍让最后一批增量落地, 再确保子进程退出
+    sleep 1
+    kill -9 "$UE_TAIL_PID" 2>/dev/null
+  fi
   UE_TAIL_PID=0
 }
 
@@ -621,9 +692,12 @@ fi
 #   $11 = 用户选定的 lk 镜像文件路径
 #   环境变量 LK_IMG / LK_DEV 可单独覆盖(LK_DEV 为精确设备节点, 跳过自动推断)
 # 注意: 多数 vivo 机型 lk 为独立(非 A/B)分区, 无 slot 后缀; 若机型为 lk_a/lk_b 可设 LK_DEV 精确指定。
+# 重要: 第 10/11 个位置参数必须用 ${10}/${11} (带大括号) 引用。
+#   裸写 $10 在 POSIX shell 里会被解析为 "$1" 后接字面字符 '0', 永远不等于 "1",
+#   导致 LK_ENABLED 始终为 0、LK 分支被整体跳过、界面无 LK 日志 (这正是"勾选 LK 却没日志"的原因)。
 LK_ENABLED=0
-[ "$10" = "1" ] && LK_ENABLED=1
-LK_IMG="${LK_IMG:-$11}"
+[ "${10}" = "1" ] && LK_ENABLED=1
+LK_IMG="${LK_IMG:-${11}}"
 
 if [ "$LK_ENABLED" = "1" ]; then
   [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第11参数 / LK_IMG)"
@@ -632,10 +706,18 @@ if [ "$LK_ENABLED" = "1" ]; then
   if [ -n "$LK_DEV" ]; then
     LK_DEV_NODE="$LK_DEV"
   else
-    LK_DEV_NODE=/dev/block/by-name/lk
-    [ -b "$LK_DEV_NODE" ] || LK_DEV_NODE=/dev/block/bootdevice/by-name/lk
+    # 自动探测 LK 分区: 优先按目标 slot 的 A/B 命名(lk_a/lk_b), 再回退固定名 lk
+    # (实测 vivo PD2419/MTK: LK 是 A/B 分区, by-name 下只有 lk_a/lk_b, 无 lk)
+    LK_DEV_NODE=""
+    for cand in /dev/block/by-name/lk$TARGET_SLOT /dev/block/by-name/lk \
+                /dev/block/bootdevice/by-name/lk$TARGET_SLOT /dev/block/bootdevice/by-name/lk; do
+      if [ -b "$cand" ]; then
+        LK_DEV_NODE="$cand"
+        break
+      fi
+    done
   fi
-  [ -b "$LK_DEV_NODE" ] || die "找不到 LK 分区设备: $LK_DEV_NODE (若机型为 lk_a/lk_b, 请设 LK_DEV 精确指定)"
+  [ -n "$LK_DEV_NODE" ] && [ -b "$LK_DEV_NODE" ] || die "找不到 LK 分区设备: ${LK_DEV_NODE:-无} (已自动探测 lk_a/lk_b/lk, 仍失败请设 LK_DEV 精确指定)"
 
   log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"
   log "  镜像: $LK_IMG"
@@ -644,7 +726,7 @@ if [ "$LK_ENABLED" = "1" ]; then
 fi
 
 # ---------- 9. 完成 ----------
-# 进度已通过 run_client --follow 前台实时输出 + tail -F 日志转发到终端, 无需再提示"正在写入"。
+# 进度已通过 run_client --follow 前台实时输出 + 后台增量日志转发到终端, 无需再提示"正在写入"。
 if [ "$6" = "1" ]; then
   sleep 3
   reboot
