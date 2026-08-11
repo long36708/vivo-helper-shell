@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <nav title="更多">
     <group title="文档">
-        <page html="https://raw.githubusercontent.com/long36708/vivo-x200pm-ota-rom/main/README.md" title="vivo-x200pm-ota-rom" />
+        <page link="https://raw.githubusercontent.com/long36708/vivo-x200pm-ota-rom/main/README.md" title="vivo-x200pm-ota-rom" />
     </group>
 
     <group title="工具">
-        <page html="https://zipbrowseronline.com/index.php" title="在线提取 OTA 包镜像 (boot/init_boot/lk)" />
+        <page link="https://zipbrowseronline.com/index.php" title="在线提取 OTA 包镜像 (boot/init_boot/lk)" />
     </group>
 </nav>

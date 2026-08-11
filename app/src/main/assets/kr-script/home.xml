@@ -33,15 +33,6 @@
             7)
             reboot fastboot
             ;;
-            8)
-            cur=$(bootctl get-active-boot-slot)
-            if [ "$cur" = "0" ]; then
-                bootctl set-active-boot-slot 1
-            else
-                bootctl set-active-boot-slot 0
-            fi
-            reboot
-            ;;
             esac
         </handler>
     </menu>
@@ -50,6 +41,14 @@
         <page config="ota/ota.xml" title="vivo 强制安装 OTA">
             <resource dir="file:///android_asset/kr-script/ota" />
         </page>
+    </group>
+
+    <group title="系统槽位">
+        <resource file="file:///android_asset/kr-script/slot/switch_slot_fix.sh" />
+        <action title="重启到另一卡槽" interruptible="false">
+            <desc>通过 AIDL service call 切换 A/B 槽位 (KernelSU 下 HIDL bootctl 失效的修复方案)，重启后进入另一槽位</desc>
+            <set>sh $START_DIR/kr-script/slot/switch_slot_fix.sh</set>
+        </action>
     </group>
 
     <group title="GT 玩机助手 OTA">
@@ -119,6 +118,12 @@
                     esac
                 fi
             </script>
+        </action>
+
+        <resource file="file:///android_asset/kr-script/hidden/clear_adb_nonblocking_ffs.sh" />
+        <action title="清除 adb nonblocking_ffs 残留" interruptible="false">
+            <desc>清空 persist.adb.nonblocking_ffs 属性值，规避刷机属性残留检测（如小骨检测）对相关项的 FAIL/高风险报告</desc>
+            <set>sh $START_DIR/kr-script/hidden/clear_adb_nonblocking_ffs.sh</set>
         </action>
     </group>
 
