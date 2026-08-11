@@ -7,4 +7,16 @@
     <group title="工具">
         <page link="https://zipbrowseronline.com/index.php" title="在线提取 OTA 包镜像 (boot/init_boot/lk)" />
     </group>
+
+    <group title="致谢">
+        <page link="https://buylan01.github.io/kr-scripts-next/Intro.html" title="kr-scripts-next" />
+        <action title="关于本项目">
+            <desc>本项目基于 kr-scripts-next 模板搭建，感谢该开源项目提供的 kr-script 配置框架与工具链基础。</desc>
+            <script>
+                echo "本项目以 kr-scripts-next 为模板搭建"
+                echo "项目地址: https://buylan01.github.io/kr-scripts-next/Intro.html"
+                echo "感谢作者提供的 kr-script 配置框架与工具链基础。"
+            </script>
+        </action>
+    </group>
 </nav>
