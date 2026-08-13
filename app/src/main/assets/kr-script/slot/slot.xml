@@ -14,9 +14,11 @@
             <desc>切换 A/B 槽位，可选仅切换不重启或切换后自动重启进入另一槽位</desc>
             <params>
                 <param name="target" type="select" title="切换目标" value="opp" required="true"
-                       desc="选择要切换到的槽位"
-                       values="opp|slot_a|slot_b"
-                       labels="对位槽 (自动判断另一槽)|A 槽 (_a)|B 槽 (_b)" />
+                       desc="选择要切换到的槽位">
+                    <option val="opp">对位槽 (自动判断另一槽)</option>
+                    <option val="slot_a">A 槽 (_a)</option>
+                    <option val="slot_b">B 槽 (_b)</option>
+                </param>
                 <param name="reboot" type="switch" label="切换后自动重启" title="切换后自动重启" desc="勾选后切换完成立即重启进入目标槽位；不勾选则只切换，稍后手动重启" />
             </params>
             <set>
