@@ -43,13 +43,13 @@
         </page>
     </group>
 
-    <group title="系统槽位">
-        <resource file="file:///android_asset/kr-script/slot/switch_slot_fix.sh" />
-        <action title="重启到另一卡槽" interruptible="false">
-            <desc>通过 AIDL service call 切换 A/B 槽位 (KernelSU 下 HIDL bootctl 失效的修复方案)，重启后进入另一槽位</desc>
-            <set>sh $START_DIR/kr-script/slot/switch_slot_fix.sh</set>
-        </action>
-    </group>
+<!--    <group title="系统槽位">-->
+<!--        <resource file="file:///android_asset/kr-script/slot/switch_slot_fix.sh" />-->
+<!--        <action title="重启到另一卡槽" interruptible="false">-->
+<!--            <desc>通过 AIDL service call 切换 A/B 槽位 (KernelSU 下 HIDL bootctl 失效的修复方案)，重启后进入另一槽位</desc>-->
+<!--            <set>sh $START_DIR/kr-script/slot/switch_slot_fix.sh</set>-->
+<!--        </action>-->
+<!--    </group>-->
 
     <group title="GT 玩机助手 OTA">
         <page config="payload/payload.xml" title="GT 强制安装 OTA 包">
