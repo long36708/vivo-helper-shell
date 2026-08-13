@@ -1,3 +1,6 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     alias(libs.plugins.android.application)
 }
@@ -15,6 +18,28 @@ android {
     namespace = appId
     compileSdk {
         version = release(37)
+    }
+
+    val localProps = Properties().apply {
+        val localFile = rootProject.file("local.properties")
+        if (localFile.exists()) {
+            FileInputStream(localFile).use { load(it) }
+        }
+    }
+    val cfgKeystorePath: String? = localProps.getProperty("KEYSTORE_PATH")
+    val cfgKeystorePass: String? = localProps.getProperty("KEYSTORE_PASS")
+    val cfgKeyAlias: String? = localProps.getProperty("KEY_ALIAS")
+    val cfgKeyPassword: String? = localProps.getProperty("KEY_PASSWORD")
+
+    if (cfgKeystorePath != null && cfgKeystorePass != null && cfgKeyAlias != null && cfgKeyPassword != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = rootProject.file(cfgKeystorePath)
+                storePassword = cfgKeystorePass
+                keyAlias = cfgKeyAlias
+                keyPassword = cfgKeyPassword
+            }
+        }
     }
 
     defaultConfig {
@@ -37,7 +62,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
     }
 
