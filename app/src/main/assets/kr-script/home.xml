@@ -60,6 +60,7 @@
     </group>
 
     <group title="快捷工具">
+        <resource file="file:///android_asset/kr-script/wifi/wifi-pwd.sh" />
         <action title="打开版本测试 (*#225#)">
             <desc>快速查看手机详细版本信息：型号、软件版本号、VGC 版本、编译时间等</desc>
             <script>
@@ -120,6 +121,11 @@
                     esac
                 fi
             </script>
+        </action>
+
+        <action title="查看已保存的 WiFi 密码">
+            <desc>查看本机已保存的所有 WiFi 网络及其密码（需要 Root 权限）</desc>
+            <set>sh "$START_DIR/kr-script/wifi/wifi-pwd.sh"</set>
         </action>
 
         <resource file="file:///android_asset/kr-script/hidden/clear_adb_nonblocking_ffs.sh" />
