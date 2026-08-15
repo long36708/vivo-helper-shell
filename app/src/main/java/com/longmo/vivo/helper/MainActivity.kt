@@ -235,6 +235,28 @@ class MainActivity : KrActivity() {
         OpenPageHelper(this).openPage(pageNode)
     }
 
+    // 更新日志：读取 assets/CHANGELOG.md，弹窗展示（可在 IO 读取，UI 填充）
+    private fun showChangelogDialog() {
+        val context = this
+        lifecycleScope.launch(Dispatchers.IO) {
+            val content = try {
+                assets.open("CHANGELOG.md").bufferedReader().use { it.readText() }
+            } catch (_: Exception) {
+                getString(R.string.changelog_empty)
+            }
+            withContext(Dispatchers.Main) {
+                val layout = LayoutInflater.from(context)
+                    .inflate(R.layout.dialog_changelog, null)
+                layout.findViewById<TextView>(R.id.tv_changelog_content).text = content
+                DialogHelper.animDialog(
+                    context,
+                    MaterialAlertDialogBuilder(context)
+                        .setView(layout)
+                )
+            }
+        }
+    }
+
     // 彩蛋入口：解锁隐藏状态并加载隐藏的 egg.xml 子页面（不在主页菜单中暴露）
     private fun maybeOpenEggPage() {
         // 持久化解锁状态，使受控分组（GT 玩机助手 OTA）在返回主页后可见
@@ -332,6 +354,11 @@ class MainActivity : KrActivity() {
                             }
                         }
                     }
+                }
+
+                // 更新日志：点击后读取内置 CHANGELOG.md 并弹窗展示
+                layout.findViewById<MaterialButton>(R.id.btn_changelog)?.setOnClickListener {
+                    showChangelogDialog()
                 }
 
                 aboutDialog = DialogHelper.animDialog(

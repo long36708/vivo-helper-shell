@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="@dimen/activity_horizontal_margin">
+
+    <TextView
+        android:id="@+id/tv_changelog_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/title_changelog"
+        android:textColor="?colorOnSurface"
+        android:textAppearance="@style/TextAppearance.Material3.TitleLarge.Emphasized" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="12dp"
+        android:alpha="0.3"
+        android:background="?colorOutline" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxHeight="420dp">
+
+        <TextView
+            android:id="@+id/tv_changelog_content"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:lineSpacingExtra="4dp"
+            android:textColor="?colorOnSurface"
+            android:textAppearance="@style/TextAppearance.Material3.BodyMedium" />
+    </ScrollView>
+</LinearLayout>
