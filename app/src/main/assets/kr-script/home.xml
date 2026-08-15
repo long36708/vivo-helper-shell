@@ -15,31 +15,31 @@
         <handler>
             case "$menu_id" in
             1)
-            shutdown now
+            /system/bin/reboot -p
             ;;
             2)
             setprop ctl.restart zygote
             ;;
             3)
-            reboot recovery
+            /system/bin/reboot recovery
             ;;
             4)
-            reboot bootloader
+            /system/bin/reboot bootloader
             ;;
             5)
-            reboot download
+            /system/bin/reboot download
             ;;
             6)
-            reboot edl
+            /system/bin/reboot edl
             ;;
             7)
-            reboot fastboot
+            /system/bin/reboot fastboot
             ;;
             8)
             sh "$START_DIR/kr-script/slot/switch_ab.sh" -o -r
             ;;
             9)
-            reboot
+            /system/bin/reboot
             ;;
             esac
         </handler>
