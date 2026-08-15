@@ -59,7 +59,7 @@ app/src/main/assets/kr-script/
 ├── home.xml          # 主页：重启菜单 + OTA + 槽位 + 快捷工具
 ├── more.xml          # 更多：文档 / 工具 / 活动 / 致谢
 ├── ota/              # vivo 强制安装 OTA 脚本与配置
-├── slot/             # A/B 槽位管理（switch_ab.sh）
+├── slot/             # A/B 槽位管理（swab.sh）
 ├── wifi/             # WiFi 密码查看
 ├── hidden/           # 残留清理等隐藏工具
 ├── toolkit/          # busybox / zip 等内置二进制

@@ -17,6 +17,56 @@
         </action>
     </group>
 
+    <group title="电源 / 重启">
+        <resource dir="file:///android_asset/kr-script/slot" />
+        <summary>高危操作集合，请确认已获得 Root 权限并清楚后果后再执行</summary>
+
+        <action title="关机" auto-off="true" confirm="true">
+            <desc>立即关机（需 Root）</desc>
+            <set>/system/bin/reboot -p</set>
+        </action>
+
+        <action title="重启" auto-off="true" confirm="true">
+            <desc>正常重启（需 Root）</desc>
+            <set>/system/bin/reboot</set>
+        </action>
+
+        <action title="软重启" auto-off="true" confirm="true">
+            <desc>仅重启 Android 用户空间（Zygote），不重启内核</desc>
+            <set>setprop ctl.restart zygote</set>
+        </action>
+
+        <action title="重启到 Recovery" auto-off="true" confirm="true">
+            <desc>重启进入 Recovery 模式（需 Root）</desc>
+            <set>/system/bin/reboot recovery</set>
+        </action>
+
+        <action title="重启到 Bootloader" auto-off="true" confirm="true">
+            <desc>重启进入 Bootloader（需 Root）</desc>
+            <set>/system/bin/reboot bootloader</set>
+        </action>
+
+        <action title="重启到 Download" auto-off="true" confirm="true">
+            <desc>重启进入 Download 模式（需 Root）</desc>
+            <set>/system/bin/reboot download</set>
+        </action>
+
+        <action title="重启到 EDL" auto-off="true" confirm="true">
+            <desc>重启进入 EDL 9008 模式（需 Root）</desc>
+            <set>/system/bin/reboot edl</set>
+        </action>
+
+        <action title="重启到 Fastbootd" auto-off="true" confirm="true">
+            <desc>重启进入 Fastbootd（需 Root）</desc>
+            <set>/system/bin/reboot fastboot</set>
+        </action>
+
+        <action title="重启到另一卡槽" auto-off="true" confirm="true">
+            <desc>切换到另一个 A/B 槽位并重启（需 Root）</desc>
+            <set>sh "$START_DIR/kr-script/slot/swab.sh" -o -r</set>
+        </action>
+    </group>
+
     <group title="模块仓库">
         <page html="file:///android_asset/scene_magisk_repo.html" title="Scene Magisk 模块仓库">
             <desc>内置网页浏览器打开 Scene Magisk 模块仓库，可搜索、查看模块详情与下载（联网使用）</desc>

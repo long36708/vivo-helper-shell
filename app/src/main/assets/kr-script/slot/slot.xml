@@ -6,8 +6,8 @@
         <summary>通过 Boot Control HAL (AIDL) 切换 A/B 分区槽位，并手动对齐 misc 偏移处槽位后缀与 CRC-32，重启后生效</summary>
 
         <action title="查看当前槽位状态" interruptible="true">
-            <desc>只读查看当前运行槽、待生效槽 (HAL)、misc 后缀、可启动性与 boot_ctrl CRC-32 校验，不修改任何分区</desc>
-            <set>sh "$START_DIR/kr-script/slot/switch_ab.sh"</set>
+            <desc>只读查看当前运行在哪个槽、下次会启动哪个槽、misc 记录、是否可正常启动，以及 boot_ctrl 数据校验。不会修改任何分区，可随时点</desc>
+            <set>sh "$START_DIR/kr-script/slot/swab.sh"</set>
         </action>
 
         <action title="切换槽位" interruptible="false">
@@ -29,13 +29,52 @@
                 esac
                 ARGS="$TARGET"
                 [ "$reboot" = "true" ] &amp;&amp; ARGS="$ARGS -r"
-                sh "$START_DIR/kr-script/slot/switch_ab.sh" $ARGS
+                sh "$START_DIR/kr-script/slot/swab.sh" $ARGS
             </set>
         </action>
 
         <action title="重启到另一卡槽" interruptible="false">
             <desc>直接切换到对位槽 (以当前运行槽为基准自动判断) 并立即重启，进入另一槽位</desc>
-            <set>sh "$START_DIR/kr-script/slot/switch_ab.sh" -o -r</set>
+            <set>sh "$START_DIR/kr-script/slot/swab.sh" -o -r</set>
+        </action>
+
+        <action title="查看 boot_ctrl 原始数据" interruptible="true">
+            <desc>只读导出 misc 里 boot_ctrl 的完整底层数据（槽位优先级 / 剩余启动次数 / 是否启动成功 / 校验码）。适合想看清分区细节或排查问题时看</desc>
+            <set>sh "$START_DIR/kr-script/slot/swab.sh" -d</set>
+        </action>
+
+        <action title="设置槽位为 active" interruptible="false">
+            <desc>把指定槽位设为"优先启动"(priority=15, 剩余启动次数=7)，并降低其他槽位优先级，强制手机下次引导到该槽。操作后下方会自动显示结果，可对照"是否成功"</desc>
+            <params>
+                <param name="slot" type="select" title="目标槽位" value="a" required="true"
+                       desc="要设为 active 的槽位">
+                    <option val="a">A 槽 (_a)</option>
+                    <option val="b">B 槽 (_b)</option>
+                </param>
+                <param name="reboot" type="switch" label="设置后自动重启" title="设置后自动重启" desc="勾选后立即重启进入目标槽位；不勾选则需手动重启" />
+            </params>
+            <set>
+                ARGS="-a $slot"
+                [ "$reboot" = "true" ] &amp;&amp; ARGS="$ARGS -r"
+                sh "$START_DIR/kr-script/slot/swab.sh" $ARGS
+            </set>
+        </action>
+
+        <action title="进入保护模式" interruptible="false">
+            <desc>把指定槽位设为保护状态(启动成功标志=0, 剩余启动次数=6)，万一切换失败也能多几次自救机会、降低变砖风险。操作后下方会自动显示结果</desc>
+            <params>
+                <param name="slot" type="select" title="目标槽位" value="a" required="true"
+                       desc="要进入保护模式的槽位">
+                    <option val="a">A 槽 (_a)</option>
+                    <option val="b">B 槽 (_b)</option>
+                </param>
+                <param name="reboot" type="switch" label="设置后自动重启" title="设置后自动重启" desc="勾选后立即重启；不勾选则需手动重启" />
+            </params>
+            <set>
+                ARGS="-p $slot"
+                [ "$reboot" = "true" ] &amp;&amp; ARGS="$ARGS -r"
+                sh "$START_DIR/kr-script/slot/swab.sh" $ARGS
+            </set>
         </action>
     </group>
 </config>

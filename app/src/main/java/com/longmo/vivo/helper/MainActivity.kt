@@ -130,7 +130,11 @@ class MainActivity : KrActivity() {
 
             getConfig(page)?.let { config ->
 
-                menuHandler = config.pageHandlerSh.takeIf { it.isNotEmpty() }
+                // 仅当该页自身声明了 handler 时才覆盖，避免后续无 handler 的页（如彩蛋页）
+                // 在循环里把 menuHandler 顶掉成 null，导致所有菜单项点击失效。
+                config.pageHandlerSh.takeIf { it.isNotEmpty() }?.let {
+                    menuHandler = it
+                }
 
                 config.pageMenuOptions.let {
                     menuOptions.addAll(it)

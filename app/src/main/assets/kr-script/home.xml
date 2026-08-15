@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <nav title="主页">
-    <resource file="file:///android_asset/kr-script/slot/switch_ab.sh" />
+    <resource file="file:///android_asset/kr-script/slot/swab.sh" />
 
     <menu>
         <option type="default" id="1" auto-off="true" shell="hidden" confirm="true">关机</option>
@@ -15,31 +15,31 @@
         <handler>
             case "$menu_id" in
             1)
-            shutdown now
+            /system/bin/reboot -p
             ;;
             2)
             setprop ctl.restart zygote
             ;;
             3)
-            reboot recovery
+            /system/bin/reboot recovery
             ;;
             4)
-            reboot bootloader
+            /system/bin/reboot bootloader
             ;;
             5)
-            reboot download
+            /system/bin/reboot download
             ;;
             6)
-            reboot edl
+            /system/bin/reboot edl
             ;;
             7)
-            reboot fastboot
+            /system/bin/reboot fastboot
             ;;
             8)
-            sh "$START_DIR/kr-script/slot/switch_ab.sh" -o -r
+            sh "$START_DIR/kr-script/slot/swab.sh" -o -r
             ;;
             9)
-            reboot
+            /system/bin/reboot
             ;;
             esac
         </handler>
@@ -53,7 +53,7 @@
 
     <group title="系统槽位">
         <page config="slot/slot.xml" title="A/B 槽位管理">
-            <resource file="file:///android_asset/kr-script/slot/switch_ab.sh" />
+            <resource file="file:///android_asset/kr-script/slot/swab.sh" />
         </page>
     </group>
 

@@ -29,12 +29,12 @@
 
 - `<nav>` 顶层可直接放 `<resource file="file:///android_asset/...">`，会把脚本解压到私有目录（`ExtractAssets.extractResource`）。menu handler 执行前需确保脚本已解压，否则找不到文件。
 - `<menu>` 内部**只识别** `option` / `menu` / `handler` 三种子标签，放 `<resource>` 会被忽略（无害，脚本在 nav 顶层已声明即可）。
-- menu 的 `<handler>` 内容存到 `config.pageHandlerSh`，执行时由 `ScriptEnvironment` 注入 `START_DIR`（指向 app 私有目录根），所以 handler 里可写 `sh "$START_DIR/kr-script/slot/switch_ab.sh" ...`。
+- menu 的 `<handler>` 内容存到 `config.pageHandlerSh`，执行时由 `ScriptEnvironment` 注入 `START_DIR`（指向 app 私有目录根），所以 handler 里可写 `sh "$START_DIR/kr-script/slot/swab.sh" ...`。
 
 ### 子页面挂载
 
 - 主页 `home.xml` 通过 `<page config="slot/slot.xml" title="...">` 挂子页面；`<page>` 内部可放 `<resource>` 声明该页需要的脚本。
-- 脚本资源相对路径在解压后保持原相对结构，即 `file:///android_asset/kr-script/slot/switch_ab.sh` 解压到 `$START_DIR/kr-script/slot/switch_ab.sh`。
+- 脚本资源相对路径在解压后保持原相对结构，即 `file:///android_asset/kr-script/slot/swab.sh` 解压到 `$START_DIR/kr-script/slot/swab.sh`。
 
 ## kr-script 配置常见错误 → 规范对照表
 
@@ -56,12 +56,16 @@
 - [ ] 所有 `sh $START_DIR/...` 路径是否已加双引号？
 - [ ] 脚本 `<resource>` 是否在 `<nav>` 顶层或对应 `<page>` 内声明？
 
-## A/B 槽位切换（slot/switch_ab.sh）
+## A/B 槽位切换（slot/swab.sh）
 
 - 脚本依赖 busybox 的 `crc32` / `xxd`，且需 root（KernelSU / Magisk），脚本内部有自检。
-- 用法：`switch_ab.sh [a|b|o] [-r]`
-  - 无参：只读查看当前运行槽、待生效槽、misc 后缀、可启动性、boot_ctrl CRC-32 校验。
+- 用法：`swab.sh [a|b|o] [-r] [-d] [-a a|b] [-p a|b] [-s] [-h]`
+  - 无参 / `-s`：只读查看当前运行槽、待生效槽、misc 后缀、可启动性、boot_ctrl CRC-32 校验。
   - `a` / `b`：切到 A / B 槽。
   - `o`：切到对位槽（以当前运行槽为基准自动判断）。
   - `-r`：切换后重启。如 `-o -r` = 重启到另一卡槽。
-- 旧的 `slot/switch_slot_fix.sh` 功能不生效，已删除，改用 `switch_ab.sh`。
+  - `-d`：完整 dump boot_ctrl 元数据（移植自 abslot-tool）。
+  - `-a a|b`：设置指定槽位 active（priority=15, tries=7，其他高优先级槽降级）。
+  - `-p a|b`：保护模式（successful_boot=0, tries=6，防变砖兜底）。
+  - `-h`：帮助。
+- 旧的 `slot/switch_ab.sh` 已替换为功能更全的 `swab.sh`（额外支持 dump/active/protect 模式）。
