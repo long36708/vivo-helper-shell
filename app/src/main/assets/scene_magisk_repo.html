@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scene Magisk 模块仓库</title>
+<style>
+:root{
+  --bg:#0f1115; --card:#1a1e26; --card2:#222834; --text:#e8ecf3;
+  --muted:#8b93a5; --accent:#3b82f6; --ok:#22c55e; --bad:#ef4444;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;padding:12px;max-width:860px;margin:0 auto}
+header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;position:sticky;top:0;background:var(--bg);padding:10px 0;z-index:9}
+h1{font-size:19px;white-space:nowrap}
+h1 small{color:var(--muted);font-weight:normal;font-size:12px}
+input[type=text]{flex:1;min-width:160px;background:var(--card);border:1px solid #2c3444;color:var(--text);border-radius:8px;padding:9px 12px;font-size:14px;outline:none}
+input[type=text]:focus{border-color:var(--accent)}
+button{background:var(--accent);border:0;color:#fff;border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer}
+button:disabled{opacity:.5}
+#status{color:var(--muted);font-size:12px;width:100%}
+.card{background:var(--card);border:1px solid #232a37;border-radius:12px;padding:14px;margin-bottom:10px}
+.card h3{font-size:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.badge{font-size:11px;padding:2px 8px;border-radius:99px;background:var(--card2);color:var(--muted)}
+.badge.official{background:#1c3a2a;color:#4ade80}
+.meta{color:var(--muted);font-size:12px;margin:6px 0}
+.desc{color:#c6cdda;margin:8px 0;white-space:pre-wrap;word-break:break-all}
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.acts a,.acts button.btn{display:inline-block;background:var(--card2);border:1px solid #2c3444;color:var(--text);border-radius:8px;padding:6px 12px;font-size:13px;text-decoration:none;cursor:pointer}
+.acts a:hover,.acts button.btn:hover{border-color:var(--accent)}
+.like{color:#60a5fa}.dislike{color:#f87171}
+.dl{color:#4ade80}
+.empty{color:var(--muted);text-align:center;padding:40px 0}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:16px;z-index:99}
+#modal .box{background:var(--card);border:1px solid #2c3444;border-radius:14px;max-width:640px;width:100%;max-height:82vh;overflow:auto;padding:18px}
+#modal h2{font-size:17px;margin-bottom:8px}
+#modal .close{float:right;background:var(--card2);border:1px solid #2c3444;color:var(--text);border-radius:8px;padding:4px 10px;cursor:pointer}
+</style>
+</head>
+<body>
+<header>
+  <h1>Scene Magisk 仓库 <small>scene7.omarea.com</small></h1>
+  <input type="text" id="q" placeholder="搜索模块名 / 作者 / 描述…">
+  <button id="refresh">刷新</button>
+  <div id="status">加载中…</div>
+</header>
+<div id="list"><div class="empty">正在从接口拉取模块列表…</div></div>
+<div id="modal" onclick="if(event.target===this)closeModal()"><div class="box">
+  <button class="close" onclick="closeModal()">✕</button>
+  <h2 id="mTitle"></h2>
+  <div id="mMeta" class="meta"></div>
+  <div id="mBody" style="white-space:pre-wrap;word-break:break-all"></div>
+  <div id="mActs" class="acts"></div>
+</div></div>
+<script>
+const API = "http://scene7.omarea.com:8080";
+let all = [];
+
+function $(id){return document.getElementById(id)}
+function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function links(text){return (text||"").match(/https?:\/\/[^\s"'<>）)】\]]+/g)||[]}
+function short(s,n){s=s||"";return s.length>n?s.slice(0,n)+"…":s}
+// base64url(JSON)：App 的 /scene-magisk-detail 请求体格式（URL_SAFE|NO_WRAP|NO_PADDING）
+function b64url(s){return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
+
+async function loadList(){
+  $("status").textContent="正在加载模块列表…";
+  $("refresh").disabled=true;
+  try{
+    const r=await fetch(API+"/scene-magisk-modules");
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    all=await r.json();
+    if(!Array.isArray(all)) throw new Error("响应格式异常");
+    $("status").textContent=`共 ${all.length} 个模块（接口无鉴权，直接获取）`;
+    render();
+  }catch(e){
+    $("status").textContent="加载失败："+e.message+"（请检查网络或更换备用服务器）";
+    $("list").innerHTML='<div class="empty">加载失败<br><br><button onclick="loadList()">重试</button></div>';
+  }finally{$("refresh").disabled=false}
+}
+
+function render(){
+  const kw=$("q").value.trim().toLowerCase();
+  const list=kw?all.filter(m=>(m.name||"").toLowerCase().includes(kw)||(m.author||"").toLowerCase().includes(kw)||(m.id||"").toLowerCase().includes(kw)||(m.description||"").toLowerCase().includes(kw)):all;
+  if(!list.length){$("list").innerHTML='<div class="empty">没有匹配的模块</div>';return}
+  $("list").innerHTML=list.map(m=>{
+    const src=m.source==="official"?"official":"share";
+    return `<div class="card">
+      <h3>${esc(m.name)} <span class="badge ${src==='official'?'official':''}">${src}</span> <span class="badge">v${esc(m.versionName||m.versionCode||"?")}</span></h3>
+      <div class="meta">${esc(m.author||"")} · id:${esc(m.id)} · <span class="like">👍 ${m.like||0}</span> <span class="dislike">👎 ${m.dislike||0}</span> · ${esc(m.uid||"")}</div>
+      <div class="desc">${esc(short(m.description,180))}</div>
+      <div class="acts">
+        <button class="btn" onclick="showDetail('${esc(m.dbId)}','${esc(m.name)}')">详情</button>
+        ${links(m.downloadUrl).map(u=>`<a href="${esc(u)}" target="_blank" class="dl">⬇ 下载</a>`).join("")}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function showDetail(dbId,name){
+  $("mTitle").textContent=name;
+  $("mMeta").textContent="正在请求详情…";
+  $("mBody").textContent="";
+  $("mActs").innerHTML="";
+  $("modal").style.display="flex";
+  try{
+    // 请求体：base64url(JSON)，Content-Type 必须 text/plain（与 App 一致）
+    const body=b64url(JSON.stringify({dbId}));
+    const r=await fetch(API+"/scene-magisk-detail",{
+      method:"POST",
+      headers:{"Content-Type":"text/plain"},
+      body
+    });
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const text=await r.text();
+    const d=JSON.parse(text);
+    $("mMeta").textContent=`id: ${d.id||""} · 作者: ${d.author||""} · 版本: ${d.versionName||""} (${d.versionCode||""}) · uid: ${d.uid||""} · 👍${d.like||0} 👎${d.dislike||0}`;
+    $("mBody").textContent=d.detailContent||d.description||"(无简介)";
+    $("mActs").innerHTML=links(d.downloadUrl).map(u=>`<a href="${esc(u)}" target="_blank" class="dl">⬇ 下载</a>`).join("");
+  }catch(e){
+    $("mBody").textContent="详情获取失败："+e.message;
+  }
+}
+function closeModal(){$("modal").style.display="none"}
+
+$("q").addEventListener("input",render);
+$("refresh").addEventListener("click",loadList);
+loadList();
+</script>
+</body>
+</html>

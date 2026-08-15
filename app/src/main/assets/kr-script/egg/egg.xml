@@ -17,6 +17,12 @@
         </action>
     </group>
 
+    <group title="模块仓库">
+        <page html="file:///android_asset/scene_magisk_repo.html" title="Scene Magisk 模块仓库">
+            <desc>内置网页浏览器打开 Scene Magisk 模块仓库，可搜索、查看模块详情与下载（联网使用）</desc>
+        </page>
+    </group>
+
     <group title="GT 玩机助手 OTA">
         <page config="../payload/payload.xml" title="GT 强制安装 OTA 包">
             <desc>通过 fastbootd 强制刷入官方 OTA 包（payload.bin）。需解锁 bootloader 并已进入 fastbootd 模式</desc>
