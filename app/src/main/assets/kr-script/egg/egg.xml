@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- 隐藏彩蛋页：只能通过「关于」对话框连点应用 Logo 7 次进入，不会出现在主页菜单 -->
+<nav title="彩蛋">
+    <resource file="file:///android_asset/kr-script/egg/egg_fun.sh" />
+
+    <group title="🥚 隐藏彩蛋">
+        <summary>恭喜你发现了隐藏入口！这里收集了一些非主流的玩机小工具，仅供娱乐与研究</summary>
+
+        <action title="设备冷知识" interruptible="true">
+            <desc>随机展示一条关于你设备的冷知识（型号、Android 版本、内核、ROOT 环境等）</desc>
+            <set>sh "$START_DIR/kr-script/egg/egg_fun.sh" info</set>
+        </action>
+
+        <action title="今天的幸运色" interruptible="true">
+            <desc>根据日期随机生成一个今天的「幸运主题色」并输出其 HEX 值，纯属娱乐</desc>
+            <set>sh "$START_DIR/kr-script/egg/egg_fun.sh" lucky</set>
+        </action>
+    </group>
+
+    <group title="GT 玩机助手 OTA">
+        <page config="../payload/payload.xml" title="GT 强制安装 OTA 包">
+            <desc>通过 fastbootd 强制刷入官方 OTA 包（payload.bin）。需解锁 bootloader 并已进入 fastbootd 模式</desc>
+            <resource dir="file:///android_asset/kr-script/payload" />
+        </page>
+    </group>
+</nav>

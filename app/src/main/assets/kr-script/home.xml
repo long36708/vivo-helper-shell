@@ -4,6 +4,7 @@
 
     <menu>
         <option type="default" id="1" auto-off="true" shell="hidden" confirm="true">关机</option>
+        <option type="default" id="9" auto-off="true" shell="hidden" confirm="true">重启</option>
         <option type="default" id="2" auto-off="true" shell="hidden" confirm="true">软重启</option>
         <option type="default" id="3" auto-off="true" shell="hidden" confirm="true">重启到 Recovery</option>
         <option type="default" id="4" auto-off="true" shell="hidden" confirm="true">重启到 Bootloader</option>
@@ -37,6 +38,9 @@
             8)
             sh "$START_DIR/kr-script/slot/switch_ab.sh" -o -r
             ;;
+            9)
+            reboot
+            ;;
             esac
         </handler>
     </menu>
@@ -50,12 +54,6 @@
     <group title="系统槽位">
         <page config="slot/slot.xml" title="A/B 槽位管理">
             <resource file="file:///android_asset/kr-script/slot/switch_ab.sh" />
-        </page>
-    </group>
-
-    <group title="GT 玩机助手 OTA">
-        <page config="payload/payload.xml" title="GT 强制安装 OTA 包">
-            <resource dir="file:///android_asset/kr-script/payload" />
         </page>
     </group>
 
@@ -131,7 +129,7 @@
         <resource file="file:///android_asset/kr-script/hidden/clear_adb_nonblocking_ffs.sh" />
         <action title="清除 adb nonblocking_ffs 残留" interruptible="false">
             <desc>清空 persist.adb.nonblocking_ffs 属性值，规避刷机属性残留检测（如小骨检测）对相关项的 FAIL/高风险报告</desc>
-            <set>sh $START_DIR/kr-script/hidden/clear_adb_nonblocking_ffs.sh</set>
+            <set>sh "$START_DIR/kr-script/hidden/clear_adb_nonblocking_ffs.sh"</set>
         </action>
     </group>
 

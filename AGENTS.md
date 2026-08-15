@@ -36,6 +36,26 @@
 - 主页 `home.xml` 通过 `<page config="slot/slot.xml" title="...">` 挂子页面；`<page>` 内部可放 `<resource>` 声明该页需要的脚本。
 - 脚本资源相对路径在解压后保持原相对结构，即 `file:///android_asset/kr-script/slot/switch_ab.sh` 解压到 `$START_DIR/kr-script/slot/switch_ab.sh`。
 
+## kr-script 配置常见错误 → 规范对照表
+
+以下错误均为组件库（PageConfigReader / ActionListFragment / Params*）的确定性约定违反，曾在 `ota.xml` 等文件实际出现，已修复。**新增或修改 XML 配置时对照本表自检。**
+
+| # | 错误写法 | 后果 | 正确规范 |
+|---|----------|------|----------|
+| 1 | `<param type="select" values="a\|b" />`（用 `values`/`labels` 属性） | 属性被 `parseActionParamAttrs` 忽略，`optionsFromShell` 为空，下拉框退化为 EditText 手填框，取值无约束 | 静态选项一律用 `<option>` 子标签（见上「下拉选择」节） |
+| 2 | `<param name="x" type="bool" />` | `type="bool"` 不是组件库识别的开关类型，`ParamsSwitchRender` 不渲染，退化为 EditText，用户需手填 `true/false` | 开关用 `type="switch"`（与 `slot.xml` 一致） |
+| 3 | `<set>sh $START_DIR/kr-script/xxx.sh</set>`（路径无引号） | `$START_DIR` 若含空格会断词，脚本找不到 | `<set>sh "$START_DIR/kr-script/xxx.sh"</set>`（路径加双引号） |
+| 4 | 在 `<menu>` 内部放 `<resource>` | 被忽略，脚本不会被解压 | `<resource>` 放 `<nav>` 顶层或 `<page>` 内声明即可 |
+
+**参数类型速查**（组件库识别的 `type` 值）：
+- 文本：`text`；下拉：`select`（配 `<option>`）；开关：`switch`；文件：`file`（可配 `suffix`/`mime`）；文件夹：`folder`；包名：`package`。
+
+**自检清单**（改完 XML 后）：
+- [ ] `type="select"` 的 `<param>` 是否都带 `<option>` 子标签（而非 `values` 属性）？
+- [ ] 所有开关是否用 `type="switch"`（无 `bool`）？
+- [ ] 所有 `sh $START_DIR/...` 路径是否已加双引号？
+- [ ] 脚本 `<resource>` 是否在 `<nav>` 顶层或对应 `<page>` 内声明？
+
 ## A/B 槽位切换（slot/switch_ab.sh）
 
 - 脚本依赖 busybox 的 `crc32` / `xxd`，且需 root（KernelSU / Magisk），脚本内部有自检。

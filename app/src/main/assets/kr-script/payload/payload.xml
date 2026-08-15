@@ -13,20 +13,20 @@
                 <param name="fota" type="switch" value="true" label="第三方OTA包" title="第三方OTA包" desc="勾选走证书绕过(非官方/第三方包)" />
             </params>
             <set>
-                sh $START_DIR/kr-script/payload/ab_updater.sh "$rom" "$ChongQi" "$boot" "$Format" "$fota"
+                sh "$START_DIR/kr-script/payload/ab_updater.sh" "$rom" "$ChongQi" "$boot" "$Format" "$fota"
             </set>
         </action>
     </group>
 
     <group title="其他选项">
         <action title="显示 ROM 信息" interruptible="true">
-            <set>sh $START_DIR/kr-script/payload/cat.sh</set>
+            <set>sh "$START_DIR/kr-script/payload/cat.sh"</set>
         </action>
         <action title="退出脚本" interruptible="false">
-            <set>sh $START_DIR/kr-script/payload/exit.sh</set>
+            <set>sh "$START_DIR/kr-script/payload/exit.sh"</set>
         </action>
         <action title="强制退出" interruptible="false">
-            <set>sh $START_DIR/kr-script/payload/quit.sh</set>
+            <set>sh "$START_DIR/kr-script/payload/quit.sh"</set>
         </action>
     </group>
 </config>

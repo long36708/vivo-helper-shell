@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.LayoutInflater
+import android.view.View
 import android.view.Menu
 import android.view.MenuItem
 import android.text.SpannableString
@@ -20,6 +21,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.get
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
+import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.lifecycleScope
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import androidx.viewpager2.widget.ViewPager2
@@ -37,6 +39,8 @@ import com.krscripts.core.model.RunnableNode
 import com.krscripts.core.ui.ActionListFragment
 import com.krscripts.core.ui.DialogHelper
 import com.krscripts.core.ui.ParamsFileChooserRender
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.imageview.ShapeableImageView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -45,6 +49,29 @@ class MainActivity : KrActivity() {
 
     private var krScriptConfig = KrScriptConfig()
     lateinit var binding: ActivityMainBinding
+
+    // 彩蛋：连点关于页 Logo 触发
+    private var eggClickCount = 0
+    private var eggLastClickTime = 0L
+    private val eggPrefsName = "egg_settings"
+    private val eggUnlockedKey = "egg_unlocked"
+    // 仅在彩蛋解锁后才作为底部导航 tab 展示的彩蛋页
+    private val eggGatedPagePath = "file:///android_asset/kr-script/egg/egg.xml"
+    // 本次会话内解锁/重置后，待回到主页时刷新一次菜单（避免在对话框中 recreate 产生游离遮罩）
+    private var pendingEggMenuRefresh = false
+    private var aboutDialog: AlertDialog? = null
+
+    private fun isEggUnlocked(): Boolean =
+        getSharedPreferences(eggPrefsName, MODE_PRIVATE).getBoolean(eggUnlockedKey, false)
+
+    // 当前应展示的页面列表：基础页 + (彩蛋解锁时附加彩蛋页 tab)
+    private fun currentPageConfigs(): List<PageNode> {
+        val list = krScriptConfig.pageListConfig.toMutableList()
+        if (isEggUnlocked()) {
+            list.add(PageNode("").apply { pageConfigPath = eggGatedPagePath })
+        }
+        return list
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,10 +96,22 @@ class MainActivity : KrActivity() {
             progressBarDialog.showDialog(getString(R.string.please_wait))
 
             krScriptConfig = KrScriptConfig()
-            val pageConfigs = krScriptConfig.pageListConfig
-            buildNavgationMenu(pageConfigs)
+            buildNavgationMenu(currentPageConfigs())
 
             progressBarDialog.hideDialog()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 彩蛋解锁/重置后，从彩蛋页或关于对话框返回时刷新一次菜单（无需 recreate，避免遮罩残留）
+        if (pendingEggMenuRefresh) {
+            pendingEggMenuRefresh = false
+            lifecycleScope.launch {
+                progressBarDialog.showDialog(getString(R.string.please_wait))
+                buildNavgationMenu(currentPageConfigs())
+                progressBarDialog.hideDialog()
+            }
         }
     }
 
@@ -85,14 +124,13 @@ class MainActivity : KrActivity() {
 
         val menu = binding.bottomNavView.menu
         menu.clear()
+        menuOptions.clear()
 
         pageConfigs.forEachIndexed { index, page ->
 
             getConfig(page)?.let { config ->
 
-                config.pageHandlerSh.takeIf { it.isNotEmpty() }?.let {
-                    menuHandler = it
-                }
+                menuHandler = config.pageHandlerSh.takeIf { it.isNotEmpty() }
 
                 config.pageMenuOptions.let {
                     menuOptions.addAll(it)
@@ -197,6 +235,22 @@ class MainActivity : KrActivity() {
         OpenPageHelper(this).openPage(pageNode)
     }
 
+    // 彩蛋入口：解锁隐藏状态并加载隐藏的 egg.xml 子页面（不在主页菜单中暴露）
+    private fun maybeOpenEggPage() {
+        // 持久化解锁状态，使受控分组（GT 玩机助手 OTA）在返回主页后可见
+        getSharedPreferences(eggPrefsName, MODE_PRIVATE)
+            .edit().putBoolean(eggUnlockedKey, true).apply()
+
+        // 标记待刷新：返回主页(onResume)时重建菜单，避免在此处 recreate 造成进度遮罩残留
+        pendingEggMenuRefresh = true
+
+        val eggPage = PageNode("").apply {
+            title = getString(R.string.egg_page_title)
+            pageConfigPath = "file:///android_asset/kr-script/egg/egg.xml"
+        }
+        openPage(eggPage)
+    }
+
     private fun getThemeColor(attrRes: Int): Int {
         val typedValue = TypedValue()
         this.theme.resolveAttribute(attrRes, typedValue, true)
@@ -251,7 +305,41 @@ class MainActivity : KrActivity() {
                 val tvFrameworkInfo = layout.findViewById<TextView>(R.id.tv_framework_info)
                 tvFrameworkInfo.text = getString(R.string.framework_info, frameworkVersion)
 
-                DialogHelper.animDialog(this, MaterialAlertDialogBuilder(this).setView(layout).setTitle(getString(R.string.title_about)))
+                // 彩蛋：连点应用 Logo 7 次跳转到隐藏功能页
+                layout.findViewById<ShapeableImageView>(R.id.app_logo)?.setOnClickListener {
+                    val now = System.currentTimeMillis()
+                    eggClickCount = if (now - eggLastClickTime < 600) eggClickCount + 1 else 1
+                    eggLastClickTime = now
+                    if (eggClickCount >= 7) {
+                        eggClickCount = 0
+                        maybeOpenEggPage()
+                    }
+                }
+
+                // 已解锁彩蛋时显示「重置」入口，点击后清除解锁状态并刷新主页
+                layout.findViewById<MaterialButton>(R.id.btn_reset_egg)?.let { resetBtn ->
+                    if (isEggUnlocked()) {
+                        resetBtn.visibility = View.VISIBLE
+                        resetBtn.setOnClickListener {
+                            getSharedPreferences(eggPrefsName, MODE_PRIVATE)
+                                .edit().putBoolean(eggUnlockedKey, false).apply()
+                            // 关闭对话框后直接刷新菜单（dismiss 不会触发 onResume）
+                            aboutDialog?.dismiss()
+                            lifecycleScope.launch {
+                                progressBarDialog.showDialog(getString(R.string.please_wait))
+                                buildNavgationMenu(currentPageConfigs())
+                                progressBarDialog.hideDialog()
+                            }
+                        }
+                    }
+                }
+
+                aboutDialog = DialogHelper.animDialog(
+                    this,
+                    MaterialAlertDialogBuilder(this)
+                        .setView(layout)
+                        .setTitle(getString(R.string.title_about))
+                ) as AlertDialog
             }
             else -> {
                 onMenuItemClick(menuOptions[item.itemId])

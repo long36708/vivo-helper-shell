@@ -7,7 +7,7 @@
 
         <action title="查看当前槽位状态" interruptible="true">
             <desc>只读查看当前运行槽、待生效槽 (HAL)、misc 后缀、可启动性与 boot_ctrl CRC-32 校验，不修改任何分区</desc>
-            <set>sh $START_DIR/kr-script/slot/switch_ab.sh</set>
+            <set>sh "$START_DIR/kr-script/slot/switch_ab.sh"</set>
         </action>
 
         <action title="切换槽位" interruptible="false">
@@ -29,13 +29,13 @@
                 esac
                 ARGS="$TARGET"
                 [ "$reboot" = "true" ] &amp;&amp; ARGS="$ARGS -r"
-                sh $START_DIR/kr-script/slot/switch_ab.sh $ARGS
+                sh "$START_DIR/kr-script/slot/switch_ab.sh" $ARGS
             </set>
         </action>
 
         <action title="重启到另一卡槽" interruptible="false">
             <desc>直接切换到对位槽 (以当前运行槽为基准自动判断) 并立即重启，进入另一槽位</desc>
-            <set>sh $START_DIR/kr-script/slot/switch_ab.sh -o -r</set>
+            <set>sh "$START_DIR/kr-script/slot/switch_ab.sh" -o -r</set>
         </action>
     </group>
 </config>
