@@ -37,4 +37,23 @@ if pgrep -f 'update_engine --logtostderr' >/dev/null 2>&1; then
 fi
 
 echo "已尝试取消并重启 update_engine。可用『查看安装进度』确认状态。"
+
+# 取消后的二选一引导 (借鉴 Custota 的 REVERT / resetStatus 思路):
+# 取消可能发生在不同阶段, 给出对应处置建议, 避免用户误判"是否已刷入"。
+# 注意: update_engine_client 无 --status flag (真机实测报 unknown command line flag),
+#       状态只能从落盘日志 (/logdata/recovery/update_engine_log) 关键字判定。
+UE_LOG_DIR=/logdata/recovery/update_engine_log
+LAST_LOG=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+STATE_HINT=""
+[ -n "$LAST_LOG" ] && STATE_HINT=$(grep -aoE 'UPDATED_NEED_REBOOT|UPDATE_STATUS_IDLE|ActionProcessor: (suspending|resuming|finished)|Downloading|Verifying|Finalizing' "$LAST_LOG" 2>/dev/null | tail -1)
+if echo "$STATE_HINT" | grep -q 'UPDATED_NEED_REBOOT'; then
+  echo ""
+  echo "⚠ 引擎日志显示 UPDATED_NEED_REBOOT: 本次取消前, 包可能已部分/全部写入目标槽。"
+  echo "   情况A (想保留本次更新): 直接『重启设备』即可让已刷入的包生效。"
+  echo "   情况B (想放弃、改刷其他包): 用『强制重刷(FORCE)』清状态后重刷, 否则可能卡在待生效态。"
+elif echo "$STATE_HINT" | grep -qi 'IDLE\|finished\|cancel'; then
+  echo ""
+  echo "ℹ 引擎已回到可更新状态: 本次取消大概率未写入/只写了少量数据, 可安全重刷其他包。"
+  echo "   如需彻底清状态重刷: 用『强制重刷(FORCE)』入口。"
+fi
 exit 0

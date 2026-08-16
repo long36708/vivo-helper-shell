@@ -104,7 +104,9 @@ if [ "$ARG" = "stop" ]; then
   exit 0
 fi
 
-if [ "$UE_LOG_WRITABLE" = "1" ]; then
+# 注: "本次日志开始"标记仅在实时监听(无参数)模式下写入, 避免 summary/list/status
+#     等只读子命令污染 /sdcard/ota.log, 影响小结提取。
+if [ -z "$ARG" ] && [ "$UE_LOG_WRITABLE" = "1" ]; then
   echo "[vivo_ota_status] $(date '+%F %T') 本次日志开始 (同时写入 $UE_MIRROR)" >> "$UE_MIRROR"
   printf '%s%s%s\n' "$C_BLU" "[vivo_ota_status] $(date '+%F %T') 本次日志开始 (终端带颜色, 文件纯文本: $UE_MIRROR)" "$C_RST"
 fi
@@ -122,26 +124,31 @@ detect_engine_state() {
     UE_STATE=STOPPED
     return 0
   fi
-  if [ -x "$CLIENT" ]; then
-    # --status 是一次性查询, 不会阻塞
-    UE_STATE_RAW=$("$CLIENT" --status 2>&1)
-    case "$UE_STATE_RAW" in
-      *UPDATED_NEED_REBOOT*) UE_STATE=NEED_REBOOT ;;
-      *DOWNLOADING*|*VERIFYING*|*FINALIZING*|*REPORTING_ERROR_EVENT*|*CHECKING_FOR_UPDATE*|*UPDATE_AVAILABLE*)
-        UE_STATE=UPDATING ;;
-      *IDLE*) UE_STATE=IDLE ;;
-    esac
+  # 注意: update_engine_client 没有 --status flag (真机实测报 unknown command line flag),
+  #       状态只能从落盘日志 (/logdata/recovery/update_engine_log) 关键字判定。
+  L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+  if [ -n "$L" ]; then
+    UE_STATE_RAW=$(tail -40 "$L" 2>/dev/null)
+    # 终态优先
+    if grep -q 'UPDATED_NEED_REBOOT' "$L" 2>/dev/null; then
+      UE_STATE=NEED_REBOOT
+    elif grep -qE 'UPDATE_STATUS_IDLE|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null; then
+      UE_STATE=IDLE
+    elif grep -qE 'Downloading|Verifying|Finalizing|suspending|resuming|ActionProcessor|processing' "$L" 2>/dev/null; then
+      UE_STATE=UPDATING
+    fi
   fi
+  # 进程在跑但日志无明确态 -> 仍归为 UPDATING(保守)
+  [ "$UE_STATE" = "UNKNOWN" ] && UE_STATE=UPDATING
   return 0
 }
 
-# 从 client --status 原始输出里提取进度 (0.0~1.0 -> 百分比)
+# 从最新日志里提取整体进度百分比 (引擎日志常见 "overall progress X%" / "progress Y")
 print_client_progress() {
-  [ -n "$UE_STATE_RAW" ] || return 0
-  prog=$(printf '%s\n' "$UE_STATE_RAW" | sed -n 's/.*[Pp]rogress[^0-9]*\([0-9.]*\).*/\1/p' | head -1)
-  [ -n "$prog" ] || return 0
-  pct=$(awk -v p="$prog" 'BEGIN{ printf "%.1f", (p<=1 ? p*100 : p) }' 2>/dev/null)
-  [ -n "$pct" ] && put "  当前进度: ${pct}%"
+  L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+  [ -n "$L" ] || return 0
+  prog=$(grep -aoE 'overall progress[^0-9]*[0-9]+(\.[0-9]+)?%|progress[^0-9]*[0-9]+(\.[0-9]+)?%' "$L" 2>/dev/null | tail -1 | grep -aoE '[0-9]+(\.[0-9]+)?' | head -1)
+  [ -n "$prog" ] && put "  当前进度: ${prog}%"
 }
 
 show_engine_state() {
@@ -203,6 +210,63 @@ if [ "$ARG" = "list" ]; then
       put "  $f  ($(fsize "$f") 字节)"
     done
   fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# err 子命令: 查看最近一次安装失败的详情归档 (update_engine_log_err/ 下的文件)
+#   vivo 安装失败时会把错误上下文 dump 到此目录, 直接 cat 最新一份省去手动翻目录。
+#   (借鉴 Custota 失败细节写 update_engine_log_err + 结构化的错误诊断思路)
+# ---------------------------------------------------------------------------
+if [ "$ARG" = "err" ]; then
+  if [ ! -d "$UE_ERR_DIR" ]; then
+    put "未找到失败归档目录 $UE_ERR_DIR (本次可能未失败, 或日志目录结构不同)。"
+    show_engine_state
+    exit 0
+  fi
+  ERRF=$(latest_err)
+  if [ -z "$ERRF" ]; then
+    put "✅ $UE_ERR_DIR 下暂无失败归档 (最近一次安装未写出错误详情)。"
+    show_engine_state
+    exit 0
+  fi
+  printf '%s%s%s\n' "$C_BLU" "==== 最近失败归档: $ERRF ====" "$C_RST"
+  put "  (大小: $(fsize "$ERRF") 字节)"
+  color_stream < "$ERRF"
+  put ""
+  put "(如需查看全部归档: sh \$0 list  然后 cat 指定文件)"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# summary 子命令: 查看"本次安装小结" (vivo_ota.sh 段9 写入 /sdcard/ota.log 的区块)
+#   从镜像日志里倒序找最近一段 "──── 安装小结 ────" .. "DONE" 之间的内容打印。
+#   找不到时回退提示引擎当前状态。 (借鉴 Custota 安装后结构化结果展示思路)
+# ---------------------------------------------------------------------------
+if [ "$ARG" = "summary" ]; then
+  MIRROR=/sdcard/ota.log
+  if [ ! -f "$MIRROR" ]; then
+    put "未找到 $MIRROR (尚未进行过任何安装)。"
+    show_engine_state
+    exit 0
+  fi
+  # 定位最近一份小结: 保留最后一段 "──── 安装小结 ────" .. "DONE" 之间的内容
+  # (不依赖 tac/tail -r, toybox 可能无这两者; 用 awk 记录每段, 取最后一段)
+  SUMMARY=$(awk '
+    /──── 安装小结 ────/ { buf=""; inblk=1 }
+    inblk { buf = buf $0 "\n"; if (/^DONE$/) { lastbuf=buf; inblk=0 } }
+    END { printf "%s", lastbuf }
+  ' "$MIRROR" 2>/dev/null)
+  if [ -z "$SUMMARY" ]; then
+    put "未在 $MIRROR 找到安装小结 (可能尚未完成一次安装)。"
+    put "最近日志尾部:"
+    tail -n 15 "$MIRROR" 2>/dev/null | color_stream
+    exit 0
+  fi
+  printf '%s%s%s\n' "$C_BLU" "==== 最近一次安装小结 ====" "$C_RST"
+  printf '%s\n' "$SUMMARY" | color_stream
+  printf '%s%s%s\n' "$C_BLU" "==========================" "$C_RST"
+  put "(完整日志见 $MIRROR)"
   exit 0
 fi
 

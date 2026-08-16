@@ -87,6 +87,22 @@ if [ "$UE_LOG_WRITABLE" = "1" ]; then
   printf '%s%s%s\n' "$C_BLU" "[vivo_ota] $(date '+%F %T') 本次日志开始 (终端带颜色, 文件纯文本: $UE_MIRROR)" "$C_RST"
 fi
 
+# ---------- 安装单例锁 (防重复点击导致两个 client 抢 engine -> 66/89) ----------
+# 借鉴 vivo_ota_status.sh 的单例锁思路: 用 pid 文件 + kill -0 存活检测。
+# 仅阻塞"真正发起安装"的入口(本脚本), 不影响 status/cancel 等只读/控制命令。
+INSTALL_LOCK=/data/local/tmp/vivo_ota_install.pid
+if [ -f "$INSTALL_LOCK" ]; then
+  OLD_PID=$(cat "$INSTALL_LOCK" 2>/dev/null)
+  if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    die "已有安装实例在运行 (pid=$OLD_PID), 请勿重复点击安装。如确认无残留, 删 $INSTALL_LOCK 后重试。"
+  fi
+  # 旧 pid 已失效, 清理后继续
+  rm -f "$INSTALL_LOCK" 2>/dev/null
+fi
+echo "$$" > "$INSTALL_LOCK" 2>/dev/null
+# 脚本正常退出/被信号终止时释放锁 (kill -9 无法触发, 但上面的 kill -0 是主要保障)
+trap 'rm -f "$INSTALL_LOCK" 2>/dev/null' EXIT
+
 # 启动前清理: 仅当确实存在残留时才清理, 避免对正常状态误操作。
 # 1) otacerts.zip 仅在其确被 bind 挂载时才卸载 (证书绕过失败时才会留下)
 if grep -q ' /system/etc/security/otacerts.zip ' /proc/mounts 2>/dev/null \
@@ -184,6 +200,27 @@ CUR_DEVICE=$(getprop ro.product.device 2>/dev/null)
   && log "⚠ hardware-device($HW_DEVICE) 不含当前($CUR_DEVICE), 跨机型风险"
 [ -n "$DEVICE" ] && [ -n "$CUR_DEVICE" ] && [ "$DEVICE" != "$CUR_DEVICE" ] \
   && log "⚠ pre-device=$DEVICE 当前=$CUR_DEVICE (vivo 多代号, 谨慎)"
+
+# 非降级模式下, 软校验安全补丁级别与构建时间戳, 阻断"误刷更旧的系统"
+# (借鉴 Custota fetchAndCheckMetadata 的 postSecurityPatchLevel/postTimestamp 比对)。
+# 仅为提醒(不强制 die), 因 vivo 多代号跨版本有时确实需要刷旧基线; 降级模式($2=1)整体跳过。
+if [ "$2" != "1" ]; then
+  POST_PATCH=$(grep -m1 '^post-security-patch-level=' "$META" | cut -d= -f2)
+  POST_TS=$(grep -m1 '^post-timestamp=' "$META" | cut -d= -f2)
+  CUR_PATCH=$(getprop ro.build.version.security_patch 2>/dev/null)
+  CUR_TS=$(getprop ro.build.date.utc 2>/dev/null)
+  if [ -n "$POST_PATCH" ] && [ -n "$CUR_PATCH" ]; then
+    # 简单字典序/日期串比较(YYYY-MM-DD 格式可直接比), 旧于当前则警告
+    if [ "$POST_PATCH" \< "$CUR_PATCH" ]; then
+      log "⚠ 安全补丁级别: 包=$POST_PATCH < 设备当前=$CUR_PATCH (非降级模式, 疑似刷更旧系统, 请确认)"
+    fi
+  fi
+  if [ -n "$POST_TS" ] && [ -n "$CUR_TS" ]; then
+    if [ "$POST_TS" -lt "$CUR_TS" ] 2>/dev/null; then
+      log "⚠ 构建时间戳: 包=$POST_TS < 设备当前=$CUR_TS (非降级模式, 疑似刷更旧系统, 请确认)"
+    fi
+  fi
+fi
 
 # ---------- 2. 降级绕过 (错误92) ----------
 if [ "$2" = "1" ]; then
@@ -435,6 +472,15 @@ run_client() {
 clear_ue_state() {
   pkill -9 update_engine 2>/dev/null
   sleep 1
+  # 官方清状态流程 (真机实测验证): 顺序必须是 cancel -> reset_status -> 删目录兜底。
+  # 否则 reset_status 会报 "Already processing an update, cancel it first" (rc=248)。
+  # 对应 Custota 的 REVERT / resetStatus 思路, 比手删目录更干净(走引擎自身状态机)。
+  if [ -x "$UPDATE_ENGINE_CLIENT" ]; then
+    OUT=$("$CLIENT" --cancel 2>&1)
+    log "  [reset] cancel: $OUT"
+    OUT=$("$CLIENT" --reset_status 2>&1)
+    log "  [reset] reset_status: $OUT"
+  fi
   # 候选状态目录(不同 ROM 路径略有差异), 只删状态文件不删整个目录避免权限问题
   for d in /data/misc/update_engine /data/misc/update_engine/prefs; do
     [ -d "$d" ] || continue
@@ -605,6 +651,25 @@ is_fail_code() {
   return 1
 }
 
+# 错误码 -> 人类可读含义 (借鉴 Custota 的 UpdateEngineError/UpdateEngineStatus 枚举表思路)
+# 覆盖 vivo update_engine 常见返回码; 未知码回退为"未知/需查 logcat"。
+# 注意: 0/1 视为成功, 248=UPDATED_NEED_REBOOT 视为成功(待重启), 这些不进 FAIL_CODES。
+code_to_text() {
+  case "$1" in
+    0)   echo "成功 (SUCCESS)" ;;
+    1)   echo "成功 (update_engine 以 1 退出但无其他失败迹象, 视为成功)" ;;
+    10)  echo "签名/证书校验失败 (kErrorCode=10, Failed to verify package)" ;;
+    15)  echo "新 rootfs 验证失败 (kNewRootfsVerificationError=15, 多因机型不匹配或附加载荷校验不过)" ;;
+    89)  echo "读取附加载荷失败 (kErrorCode=89, Failed to get additional payloads)" ;;
+    92)  echo "降级被拒 (kDowngrade=92, 需开启降级模式 ro.ota.allow_downgrade=true)" ;;
+    248) echo "已应用, 等待重启生效 (UPDATED_NEED_REBOOT=248, 视为成功)" ;;
+    66)  echo "状态机冲突 (kErrorCode=66, 上一次状态未清, 通常需重启后再试或 FORCE=1 强制清状态)" ;;
+    21)  echo "payload 元数据大小校验失败 (kDownloadInvalidMetadataSize=21, headers 解析异常)" ;;
+    42)  echo "payload 哈希/大小校验失败 (kPayloadHashMismatch/SizeMismatch=42)" ;;
+    *)   echo "未知返回码 ($1), 需结合 logcat / update_engine_log 进一步诊断" ;;
+  esac
+}
+
 # 248 = UPDATED_NEED_REBOOT: 上一次刷的包已应用、正等重启生效, 视为成功(只是需重启)。
 # # 默认提示重启即可, 不重刷(避免覆盖已刷好的包)。FORCE_REFRESH=1 才清状态强制重刷。
 # if [ "$RC" -eq 248 ] 2>/dev/null || grep -q "waiting for reboot" /proc/self/fd/2 2>/dev/null; then
@@ -654,7 +719,7 @@ if is_fail_code "$RC"; then
   esac
 fi
 
-log "update_engine_client 返回 $RC (非失败错误码, 按成功处理)"
+log "update_engine_client 返回 $RC ($(code_to_text "$RC"))"
 
 # ---------- 8. 保留 ROOT (由用户自选分区 + 指定已修补镜像, 不再内置自动修补) ----------
 # 参数:
@@ -727,8 +792,52 @@ fi
 
 # ---------- 9. 完成 ----------
 # 进度已通过 run_client --follow 前台实时输出 + 后台增量日志转发到终端, 无需再提示"正在写入"。
+
+# 安装小结的运行环境头部 (复用: 重启/非重启两分支共用, 便于事后排查)。
+# 含: 包名/机型/型号/当前+目标 slot/返回码/ROOT 方案/证书绕过方式/thermal 阈值。
+print_install_env() {
+  log "  包: $(basename "$ROM")"
+  log "  机型代号: ${DEVICE:-未知} (当前: ${CUR_DEVICE:-未知})"
+  CUR_MODEL=$(getprop ro.product.model 2>/dev/null)
+  [ -n "$CUR_MODEL" ] && log "  型号: $CUR_MODEL"
+  log "  当前 slot=$CUR_SLOT  目标 slot=$TARGET_SLOT"
+  log "  返回码: $RC ($(code_to_text "$RC"))"
+  # ROOT 方案: 优先 KernelSU, 其次 Magisk, 否则未保留
+  if [ "$ROOT_ENABLED" = "1" ]; then
+    if [ -x "$KSU_BIN/ksud" ] || pgrep -x "ksud" >/dev/null 2>&1 || [ -d /data/adb/ksu ]; then
+      log "  保留 ROOT: $ROOT_PART$TARGET_SLOT (方案 KernelSU)"
+    elif [ -x "$MAGISK_BIN/magisk" ] || [ -d /data/adb/magisk ]; then
+      log "  保留 ROOT: $ROOT_PART$TARGET_SLOT (方案 Magisk)"
+    else
+      log "  保留 ROOT: $ROOT_PART$TARGET_SLOT (方案未知)"
+    fi
+  fi
+  [ "$LK_ENABLED" = "1" ] && log "  已写入 LK: $LK_DEV_NODE"
+  # 证书绕过方式: hexpatch > bind > 系统证书直装
+  if [ "$CERT_ACTIVE" = "1" ]; then
+    [ "$UE_PATCHED" = "1" ] && log "  证书绕过: hexpatch update_engine 路径"
+    [ "$CERT_BIND" = "1" ]  && log "  证书绕过: bind 覆盖 otacerts.zip"
+  else
+    log "  证书: 未绕过(系统证书直装, 或官方包免绕过)"
+  fi
+  # thermal 阈值: 已被本脚本拉高到 120C(默认 46C), 记录实际生效值
+  TH=$(getprop vota.virtual_ab.debug.thermal_threshold 2>/dev/null)
+  [ -n "$TH" ] && log "  thermal 阈值: ${TH}mC (默认46000, 本脚本拉高防中途过热中止)"
+}
+
 if [ "$6" = "1" ]; then
+  # 重启模式: 先打印小结再重启(重启后终端/日志会中断, 故小结必须在 reboot 前)
+  log "──────────── 安装小结 ────────────"
+  print_install_env
+  log "✅ 包已写入目标槽, 即将重启使更新生效..."
   sleep 3
   reboot
+else
+  # 非重启模式: 明确告知"已应用, 重启即生效"(借鉴 Custota reboot 通知),
+  # 用户不勾 reboot 时最容易困惑"刷完没反应", 这里补上收尾提示 + 小结。
+  log "──────────── 安装小结 ────────────"
+  print_install_env
+  log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效。"
+  log "  若需放弃本次更新改刷其他包, 重启后状态机仍处待生效态, 可 FORCE=1 强制清状态重刷。"
 fi
 log "DONE"

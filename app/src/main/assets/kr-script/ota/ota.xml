@@ -67,6 +67,22 @@
         <action title="历史进度日志列表" desc="列出全部历史日志与失败归档, 便于取消后回看">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" list</set>
         </action>
+        <action title="本次安装小结查看" desc="提取最近一次安装写入的结构化小结(包名/机型/槽位/返回码/ROOT/LK 保留情况), 安装后未重启也可随时回看">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" summary</set>
+        </action>
+        <action title="最近失败详情查看" desc="直接 cat 最近一次安装失败 dump 到 update_engine_log_err/ 的错误归档, 省去手动翻目录">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" err</set>
+        </action>
+        <action title="暂停当前安装" desc="向 update_engine 发送 --suspend (真机已验证有效); 仅在进行中有效, 无更新时提示无需暂停。暂停后可『恢复当前安装』继续">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_ctrl.sh" suspend</set>
+        </action>
+        <action title="恢复当前安装" desc="向 update_engine 发送 --resume, 恢复被暂停的安装">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_ctrl.sh" resume</set>
+        </action>
+        <action title="安装前预检 (preflight)" desc="不触碰 update_engine 状态机, 仅预判包结构/机型/headers/分区可写/是否降级, 零风险, 刷机前先确认能不能刷、会刷到哪">
+            <param name="rom" type="file" title="OTA 包路径" required="true" desc="待校验的 OTA zip 绝对路径" />
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_ctrl.sh" preflight "$rom"</set>
+        </action>
         <action title="取消当前安装">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_cancel.sh"</set>
         </action>
