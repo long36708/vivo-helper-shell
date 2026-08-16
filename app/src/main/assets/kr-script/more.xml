@@ -14,12 +14,16 @@
 
     <group title="致谢">
         <page link="https://buylan01.github.io/kr-scripts-next/Intro.html" title="kr-scripts-next" />
+        <page link="https://github.com/F-19-F/abslot-tool/" title="abslot-tool" />
         <action title="关于本项目">
-            <desc>本项目基于 kr-scripts-next 模板搭建，感谢该开源项目提供的 kr-script 配置框架与工具链基础。</desc>
+            <desc>本项目基于 kr-scripts-next 模板搭建，感谢该开源项目提供的 kr-script 配置框架与工具链基础。A/B 槽位管理中的保护模式（protect）设计受 https://github.com/F-19-F/abslot-tool/ 项目启发，特此致谢。</desc>
             <script>
                 echo "本项目以 kr-scripts-next 为模板搭建"
                 echo "项目地址: https://buylan01.github.io/kr-scripts-next/Intro.html"
                 echo "感谢作者提供的 kr-script 配置框架与工具链基础。"
+                echo
+                echo "A/B 槽位管理中的保护模式 (protect) 设计"
+                echo "受 https://github.com/F-19-F/abslot-tool/ 项目启发，特此致谢。"
             </script>
         </action>
     </group>
