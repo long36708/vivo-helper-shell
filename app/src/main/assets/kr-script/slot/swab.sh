@@ -140,6 +140,18 @@ show_status() {
         echo "  boot_ctrl CRC-32           : 计算=${calc:-?} 存储=${stored:-?} [X] 无效"
     fi
     echo "  boot_ctrl 原始字节         : $(dd if="$MISC" bs=1 skip=$BOOTCTRL_OFF count=$BOOTCTRL_LEN 2>/dev/null | od -A n -t x1 | tr -d ' \n')"
+    # 真实从 misc 读回各槽字段 (避免脚本预期值误导)
+    local f i lo pri tries succ
+    f=$(read_bootctl)
+    [ -s "$f" ] || { echo "  [警告] 读取 boot_ctrl 失败, 无法显示槽位字段"; return; }
+    for i in 0 1; do
+        lo=$(bc_byte "$f" $((SLOT_INFO_OFF + i*2)))
+        pri=$(( lo & 0x0F ))
+        tries=$(( (lo >> 4) & 0x07 ))
+        succ=$(( (lo >> 7) & 0x01 ))
+        echo "  槽 $(slot_name "$i") -> priority=$pri tries_remaining=$tries successful_boot=$succ"
+    done
+    rm -f "$f"
 }
 
 # 写入小端 CRC-32 到 ab_new.bin 偏移 28
@@ -339,7 +351,16 @@ commit_bootctl() { # $1=bin $2=描述
     [ -n "$newcrc" ] || { echo "  [错误] CRC-32 计算失败"; exit 1; }
     echo "  新 CRC-32 = $newcrc"
     write_crc_le "$newcrc"
-    dd if="$TMPDIR/ab_new.bin" of="$MISC" bs=1 seek=$BOOTCTRL_OFF conv=notrunc 2>/dev/null
+    # 若 misc 以只读块设备暴露, 先尝试解锁为可读写 (部分 ROM 需要)
+    if command -v blockdev >/dev/null 2>&1; then
+        blockdev --getro "$MISC" 2>/dev/null | grep -q '^1$' && blockdev --setrw "$MISC" 2>/dev/null
+    fi
+    # 写回 misc: 必须检查 dd 返回值。vivo 等 ROM 上 misc 可能只读挂载,
+    # dd 写失败需立即报错, 否则会误报成功 (CRC 校验读回的仍是旧数据)。
+    if ! dd if="$TMPDIR/ab_new.bin" of="$MISC" bs=1 seek=$BOOTCTRL_OFF conv=notrunc ; then
+        echo "  [错误] 写入 misc 失败 (dd 返回 $?), 可能分区只读或权限不足"
+        exit 1
+    fi
     sync
     # 写入后校验
     dd if="$MISC" bs=1 skip=$BOOTCTRL_OFF count=$BOOTCTRL_LEN 2>/dev/null > "$TMPDIR/ab_after.bin"
@@ -363,7 +384,7 @@ set_meta_active() { # $1=0|1
     succ=$(( (lo >> 7) & 0x01 ))
     newlo=$(( (succ << 7) | (7 << 4) | 15 ))
     bc_set_byte "$f" $((SLOT_INFO_OFF + idx*2)) "$newlo"
-    echo "  槽 $(slot_name "$idx") -> priority=15 tries_remaining=7"
+    echo "  设置 $(slot_name "$idx") -> priority=15 tries_remaining=7"
     for i in 0 1 2 3; do
         [ "$i" = "$idx" ] && continue
         lo=$(bc_byte "$f" $((SLOT_INFO_OFF + i*2)))
@@ -386,7 +407,7 @@ protect_meta() { # $1=0|1
     pri=$(( lo & 0x0F ))
     newlo=$(( (6 << 4) | pri ))
     bc_set_byte "$f" $((SLOT_INFO_OFF + idx*2)) "$newlo"
-    echo "  槽 $(slot_name "$idx") -> successful_boot=0 tries_remaining=6"
+    echo "  设置 $(slot_name "$idx") -> successful_boot=0 tries_remaining=6"
     commit_bootctl "$f" "进入保护模式 (槽 $(slot_name "$idx"))"
     rm -f "$f"
 }
