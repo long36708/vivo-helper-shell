@@ -90,18 +90,44 @@ fi
 # ---------- 安装单例锁 (防重复点击导致两个 client 抢 engine -> 66/89) ----------
 # 借鉴 vivo_ota_status.sh 的单例锁思路: 用 pid 文件 + kill -0 存活检测。
 # 仅阻塞"真正发起安装"的入口(本脚本), 不影响 status/cancel 等只读/控制命令。
+# 自愈: 残留 pid 若已失效 -> 直接清理放行(不误拦); 若 pid 存活, 进一步判断引擎是否
+#       真在"安装中"——只有"本脚本另一个实例在跑"或"引擎确在进行中安装"才拦截,
+#       避免把"上次异常退出遗留的死锁 pid"误判成重复点击而卡死用户。
 INSTALL_LOCK=/data/local/tmp/vivo_ota_install.pid
 if [ -f "$INSTALL_LOCK" ]; then
   OLD_PID=$(cat "$INSTALL_LOCK" 2>/dev/null)
   if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    die "已有安装实例在运行 (pid=$OLD_PID), 请勿重复点击安装。如确认无残留, 删 $INSTALL_LOCK 后重试。"
+    # pid 存活: 判断是否真在装(自愈关键)
+    ENGINE_BUSY=0
+    if pgrep -x update_engine >/dev/null 2>&1; then
+      L=$(ls -t /logdata/recovery/update_engine_log/update_engine.* 2>/dev/null | head -1)
+      if [ -n "$L" ]; then
+        # 终态(已空闲/已应用待重启) -> 视为无进行中安装, 残留 pid 是死锁, 清理放行
+        if grep -qE 'UPDATE_STATUS_IDLE|UPDATED_NEED_REBOOT|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null; then
+          ENGINE_BUSY=0
+        else
+          ENGINE_BUSY=1
+        fi
+      else
+        # 有进程但无日志, 保守视为在进行中
+        ENGINE_BUSY=1
+      fi
+    fi
+    if [ "$ENGINE_BUSY" = "1" ]; then
+      die "已有安装实例在运行 (pid=$OLD_PID) 且引擎正在进行中, 请勿重复点击安装。如确认无残留, 删 $INSTALL_LOCK 后重试。"
+    fi
+    log "检测到残留安装锁 (pid=$OLD_PID 已失效或引擎已空闲), 视为死锁自动清理放行"
   fi
-  # 旧 pid 已失效, 清理后继续
+  # 旧 pid 已失效/已自愈, 清理后继续
   rm -f "$INSTALL_LOCK" 2>/dev/null
 fi
 echo "$$" > "$INSTALL_LOCK" 2>/dev/null
 # 脚本正常退出/被信号终止时释放锁 (kill -9 无法触发, 但上面的 kill -0 是主要保障)
 trap 'rm -f "$INSTALL_LOCK" 2>/dev/null' EXIT
+
+# 记录安装开始时间(用于小结耗时统计)。用 date +%s 取 Unix 秒(原生 sh 无 $SECONDS 保证,
+# 且脚本可能被 source 进其他 shell, 自管时间戳更可靠)。
+INSTALL_START_TS=$(date +%s 2>/dev/null || echo "")
 
 # 启动前清理: 仅当确实存在残留时才清理, 避免对正常状态误操作。
 # 1) otacerts.zip 仅在其确被 bind 挂载时才卸载 (证书绕过失败时才会留下)
@@ -476,9 +502,9 @@ clear_ue_state() {
   # 否则 reset_status 会报 "Already processing an update, cancel it first" (rc=248)。
   # 对应 Custota 的 REVERT / resetStatus 思路, 比手删目录更干净(走引擎自身状态机)。
   if [ -x "$UPDATE_ENGINE_CLIENT" ]; then
-    OUT=$("$CLIENT" --cancel 2>&1)
+    OUT=$("$UPDATE_ENGINE_CLIENT" --cancel 2>&1)
     log "  [reset] cancel: $OUT"
-    OUT=$("$CLIENT" --reset_status 2>&1)
+    OUT=$("$UPDATE_ENGINE_CLIENT" --reset_status 2>&1)
     log "  [reset] reset_status: $OUT"
   fi
   # 候选状态目录(不同 ROM 路径略有差异), 只删状态文件不删整个目录避免权限问题
@@ -823,6 +849,21 @@ print_install_env() {
   # thermal 阈值: 已被本脚本拉高到 120C(默认 46C), 记录实际生效值
   TH=$(getprop vota.virtual_ab.debug.thermal_threshold 2>/dev/null)
   [ -n "$TH" ] && log "  thermal 阈值: ${TH}mC (默认46000, 本脚本拉高防中途过热中止)"
+  # 耗时统计: 从记录的安装开始时间算到小结打印时刻。
+  if [ -n "$INSTALL_START_TS" ]; then
+    END_TS=$(date +%s 2>/dev/null)
+    if [ -n "$END_TS" ]; then
+      ELAPSED=$(( END_TS - INSTALL_START_TS ))
+      if [ "$ELAPSED" -ge 0 ] 2>/dev/null; then
+        M=$(( ELAPSED / 60 )); S=$(( ELAPSED % 60 ))
+        if [ "$M" -gt 0 ] 2>/dev/null; then
+          log "  耗时: ${M}分${S}秒"
+        else
+          log "  耗时: ${S}秒"
+        fi
+      fi
+    fi
+  fi
 }
 
 if [ "$6" = "1" ]; then
@@ -840,4 +881,10 @@ else
   log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效。"
   log "  若需放弃本次更新改刷其他包, 重启后状态机仍处待生效态, 可 FORCE=1 强制清状态重刷。"
 fi
+# 收尾引导: 告知中途控制(取消/暂停/恢复)入口所在, 因 kr-script 架构下这些是与安装
+# 并行的独立动作(向 update_engine daemon 发信号), 不在本安装页内嵌按钮, 需到『辅助』组操作。
+log "──────────── 中途控制提示 ────────────"
+log "  安装进行中如需【取消/暂停/恢复】, 请到本页『辅助』分组点击对应按钮:"
+log "    · 取消当前安装  · 暂停当前安装  · 恢复当前安装"
+log "    (亦可『查看安装进度』实时跟随, 或『本次安装小结查看』回看本小结)"
 log "DONE"

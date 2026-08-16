@@ -134,7 +134,11 @@ detect_engine_state() {
       UE_STATE=NEED_REBOOT
     elif grep -qE 'UPDATE_STATUS_IDLE|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null; then
       UE_STATE=IDLE
-    elif grep -qE 'Downloading|Verifying|Finalizing|suspending|resuming|ActionProcessor|processing' "$L" 2>/dev/null; then
+    elif grep -q 'suspending' "$L" 2>/dev/null; then
+      # 暂停态优先于 UPDATING: 用户主动暂停后日志仍含 Downloading/ActionProcessor 等
+      # 历史行, 若放在 UPDATING 之后会被抢先判定, 故必须前置。
+      UE_STATE=SUSPENDED
+    elif grep -qE 'Downloading|Verifying|Finalizing|resuming|ActionProcessor|processing' "$L" 2>/dev/null; then
       UE_STATE=UPDATING
     fi
   fi
@@ -158,6 +162,7 @@ show_engine_state() {
     STOPPED)     put "  引擎未运行 (当前无进行中的更新)" ;;
     IDLE)        put "  引擎空闲 IDLE (当前无进行中的更新)" ;;
     UPDATING)    put "  正在安装中 ..." ; print_client_progress ;;
+    SUSPENDED)   put "  安装已暂停 (SUSPENDED)。恢复请运行『恢复当前安装』。" ; print_client_progress ;;
     NEED_REBOOT) put "  已安装完成, 等待重启生效 (UPDATED_NEED_REBOOT)" ;;
     *)           put "  状态未知 (引擎在运行, 但 --status 查询失败)" ;;
   esac
@@ -411,6 +416,7 @@ while true; do
     case "$UE_STATE" in
       UPDATING)    put "[状态] 正在安装中 ..." ; print_client_progress ;;
       NEED_REBOOT) put "[状态] 安装完成, 等待重启生效 (UPDATED_NEED_REBOOT)" ;;
+      SUSPENDED)   put "[状态] 安装已暂停 (SUSPENDED), 运行『恢复当前安装』可继续" ; print_client_progress ;;
       IDLE)        put "[状态] 引擎空闲 (当前无进行中的更新)" ;;
       STOPPED)     put "[状态] 引擎未运行" ;;
     esac

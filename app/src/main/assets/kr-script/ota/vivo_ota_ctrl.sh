@@ -58,6 +58,9 @@ case "$ARG" in
     else
       put "${C_YEL}⚠ 已发送暂停, 但未在日志中确认到 suspending (可能已接近完成)。${C_RST}"
     fi
+    # 写 ota.log 可见反馈 (与主安装日志同一入口, 方便一眼看到暂停事件)
+    OTA_LOG=/data/local/tmp/vivo_ota_install.log
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CTRL] suspend 指令 (rc=$RC), 引擎日志: ${L:-<无>}" >> "$OTA_LOG" 2>/dev/null
     ;;
   resume)
     OUT=$("$CLIENT" --resume 2>&1); RC=$?
