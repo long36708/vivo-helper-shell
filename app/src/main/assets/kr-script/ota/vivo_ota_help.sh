@@ -14,7 +14,8 @@ cat <<'EOF'
      全程用绝对路径 /system/bin/update_engine_client 调用; 优先解析流式/Strored 条目。
 
 2. 错误92 (版本守护 / 降级拦截):
-   - 正确做法: setprop ro.ota.allow_downgrade 1 (降级开关), 重启 update_engine 生效后再刷。
+   - 正确做法: resetprop ro.ota.allow_downgrade true (ro 属性, setprop 无效, 必须 resetprop),
+     再由 update_engine 重启/重读后生效 (vivo_ota.sh 勾"降级"会自动处理)。
    - 注意: persist.vivo.engmode=1 是**错误**的旧说法, vivo 该通道实际用 ro.ota.allow_downgrade。
    - 允许降级 / 跨大版本刷入
 
@@ -29,8 +30,10 @@ cat <<'EOF'
 
 与通用 KrScript (gt) 的区别:
    gt 用 magiskboot hexpatch update_engine 的证书路径跳过签名校验;
-   vivo 通道无法简单 patch (证书体系不同), 故走官方 update_engine_client +
-   版本守护属性绕过, 更安全且不易触发安全启动失败。
+   vivo 通道同样支持: 勾"证书绕过"时优先 magiskboot hexpatch update_engine 硬编码的
+   /system/etc/security/otacerts.zip 路径指向自签 testcerts, 无 magiskboot 时降级
+   mount --bind 覆盖系统证书; 校验失败(错误码10)自动回退系统证书重试一次。
+   官方/编译包通常无需绕过 (zip 注释含 "signed by SignApk" 判为编译包, 仅提示)。
 =======================================================
 EOF
 exit 0

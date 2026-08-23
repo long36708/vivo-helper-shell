@@ -368,6 +368,15 @@ fi
 
 [ -n "$PAYLOAD_FILE" ] || die "找不到 payload.bin (包结构不支持, 非标准 OTA 包?)"
 
+# 文档坑10: OTA 包 >6GB 走 /storage/emulated/0/ (FUSE) 会报 kDownloadTransferError,
+# 必须改用 /data/media/0/ 路径 (同一份文件, 绕过 FUSE 大文件读取坑)。
+case "$PAYLOAD_FILE" in
+  /storage/emulated/0/*)
+    PAYLOAD_FILE="/data/media/0/${PAYLOAD_FILE#/storage/emulated/0/}"
+    log "  payload 路径已从 /storage/emulated/0/ 转换为 /data/media/0/ (大包 FUSE 规避, 文档坑10)"
+    ;;
+esac
+
 # payload_properties.txt 的校验头 —— 对齐 GT: 传完整内容(含 POWERWASH 等), 不能只
 # 提取 4 个字段。每个 KEY=VALUE 必须独立一行: update_engine_client 的 --headers 按
 # '\n' 切分列表 (帮助文档注明 "one element of the list per line")。实测把 headers 用
@@ -505,26 +514,101 @@ ota89_cleanup_wrapper() {
 # 对齐 GT ab_updater.sh 官方包分支: 先杀掉并重启 update_engine 服务, 确保状态机干净,
 # 再带 --update 调 client (vivo 精简版 client 缺 --update 不会发起 ApplyPayload, 直接 IDLE)。
 run_client() {
-  # 前台阻塞: client 带 --follow, 持续把 update_engine 状态回调(进度百分比/阶段)输出到
-  # stdout/stderr, 先落到临时文件再经 color_stream 着色显示并纯文本镜像, 实时可见。
+  # launch 模式(对齐 vivo 排错手册步骤6): client 不带 --follow, 引擎后台接受并安装,
+  # client 立即返回 launch 退出码。避免 --follow 前台阻塞期间终端/MCP 超时把命令打掉
+  # 误 cancel 正在下载的安装(文档坑9: 实战犯过两次)。
+  # 安装进度由 start_ue_log_tail 后台轮询 /logdata/recovery/update_engine_log 增量转发。
   # 强制 cwd=/ 避免相对路径读附加载荷失败(错误89)。
   # 退出码存入全局 UE_RC (先把输出到临时文件, 才能拿到 client 真实退出码, 不受管道影响)。
   cd /
   UE_RC=0
-  UE_OUT="$TMP/ue_follow.out"
+  UE_OUT="$TMP/ue_launch.out"
   if [ "$USE_OFFSET" -eq 1 ]; then
     "$UPDATE_ENGINE_CLIENT" --update --payload="file://$PAYLOAD_FILE" \
       --offset="$PAYLOAD_OFFSET" --size="$PAYLOAD_SIZE" \
-      --headers="$HEADERS" --follow > "$UE_OUT" 2>&1
+      --headers="$HEADERS" > "$UE_OUT" 2>&1
   else
     # 非 offset: 直接把整个 zip 作为 payload 传入, 不带 offset/size,
     # update_engine 自动定位 zip 内 payload.bin 并读取附加载荷 (对齐 GT 编译包分支)。
     "$UPDATE_ENGINE_CLIENT" --update --payload="file://$PAYLOAD_FILE" \
-      --headers="$HEADERS" --follow > "$UE_OUT" 2>&1
+      --headers="$HEADERS" > "$UE_OUT" 2>&1
   fi
   UE_RC=$?
   # 立即逐行着色显示 + 镜像文件 (实时性略低于管道, 但能拿到准确退出码, 且文件无颜色)
   color_stream < "$UE_OUT"
+  if [ "$UE_RC" -ne 0 ]; then
+    log "  ⚠ launch 返回非 0 (RC=$UE_RC), 引擎可能未接受本次更新"
+    return $UE_RC
+  fi
+  # launch 成功 (EXIT=0): 引擎已在后台接受并开始安装, 轮询日志等待终态
+  # (替代 --follow 阻塞; 文档坑9: 勿用 --follow 防超时误 cancel)。
+  wait_engine_done
+  UE_RC=$?
+  return $UE_RC
+}
+
+# 等待引擎后台安装完成 (替代 --follow; 轮询日志/失败归档/状态文件判定终态)。
+# 判定顺序:
+#   1) 失败归档目录(update_engine_log_err)出现新文件 -> 提取错误码(缺省 10)判失败;
+#   2) 日志出现 UPDATED_NEED_REBOOT -> 成功待重启 (248);
+#   3) 日志出现 "Update successfully applied" / "SendPayloadApplicationComplete [0]" -> 成功 (0);
+#   4) 引擎回 IDLE 或进程退出但无成功标记 -> 以 prefs/update-result 判定
+#      (0=成功, 1=被回滚/失败, 缺省视为失败 89);
+#   5) 超时(默认 1800s=30 分钟, 覆盖 10GB 全量包 10~30 分钟耗时; OTA_WAIT_TIMEOUT 可覆盖)
+#      -> 不判失败(让用户看进度)。
+WAIT_ERR_SEEN=""
+wait_engine_done() {
+  local timeout="${OTA_WAIT_TIMEOUT:-1800}" waited=0 L ur code
+  while [ "$waited" -lt "$timeout" ] 2>/dev/null; do
+    # (1) 失败归档
+    if [ -d "$UE_ERR_DIR" ]; then
+      for f in "$UE_ERR_DIR"/*; do
+        [ -f "$f" ] || continue
+        case " $WAIT_ERR_SEEN " in
+          *" $f "*) ;;
+          *)
+            WAIT_ERR_SEEN="$WAIT_ERR_SEEN $f"
+            code=$(grep -aoE 'ErrorCode=[0-9]+|error_code[^0-9]*[0-9]+|kErrorCode[^0-9]*[0-9]+' "$f" 2>/dev/null | grep -aoE '[0-9]+' | head -1)
+            [ -z "$code" ] && code=10
+            log "⚠ 引擎写出失败归档 $f, 判定安装失败 (错误码=${code})"
+            return $code
+            ;;
+        esac
+      done
+    fi
+    # (2)/(3) 终态: 成功标记
+    L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+    if [ -n "$L" ]; then
+      if grep -aq 'UPDATED_NEED_REBOOT' "$L" 2>/dev/null; then
+        log "✅ 引擎报告 UPDATED_NEED_REBOOT (写入完成, 等待重启生效)"
+        return 248
+      fi
+      if grep -aqE 'Update successfully applied|SendPayloadApplicationComplete \[0\]' "$L" 2>/dev/null; then
+        log "✅ 引擎报告写入成功 (SendPayloadApplicationComplete [0])"
+        return 0
+      fi
+      # (4) 引擎回 IDLE 但无成功标记 -> prefs/update-result 判定。
+      #     仅在"无进行中关键字"时才判定 IDLE, 避免命中历史 IDLE 行误判。
+      if grep -aqE 'UPDATE_STATUS_IDLE|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null \
+         && ! grep -aqE 'Downloading|Applying|Verifying|Finalizing|ActionProcessor|processing|postinstall' "$L" 2>/dev/null; then
+        ur=$(cat /data/misc/update_engine/prefs/update-result 2>/dev/null)
+        [ "$ur" = "0" ] && { log "✅ 引擎回到 IDLE 且 update-result=0 (成功)"; return 0; }
+        log "⚠ 引擎回到 IDLE 且无成功标记 (update-result=${ur:-无}), 判定未完成"
+        return 89
+      fi
+    fi
+    # (4b) 引擎进程退出 -> 以 prefs 判定
+    if ! pgrep -x update_engine >/dev/null 2>&1; then
+      ur=$(cat /data/misc/update_engine/prefs/update-result 2>/dev/null)
+      [ "$ur" = "0" ] && { log "✅ 引擎进程退出且 update-result=0 (成功)"; return 0; }
+      log "⚠ 引擎进程已退出且无成功标记 (update-result=${ur:-无}), 判定未完成"
+      return 89
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  log "⚠ 等待引擎完成超时 (${timeout}s), 未判定失败, 请用『查看安装进度』确认结果"
+  return 0
 }
 
 # update_engine 的 UPDATED_NEED_REBOOT 等状态会持久化在 /data/misc/update_engine 下,
@@ -546,17 +630,33 @@ clear_ue_state() {
     OUT=$("$UPDATE_ENGINE_CLIENT" --reset_status 2>&1)
     log "  [reset] reset_status: $OUT"
   fi
-  # 候选状态目录(不同 ROM 路径略有差异), 只删状态文件不删整个目录避免权限问题
-  for d in /data/misc/update_engine /data/misc/update_engine/prefs; do
-    [ -d "$d" ] || continue
-    log "  清空 update_engine 持久化状态: $d"
-    find "$d" -maxdepth 1 -type f \( \
-      -name 'update_engine_prefs*' -o \
-      -name 'rollback*' -o \
-      -name '*.json' -o \
-      -name 'last_update*' \) -delete 2>/dev/null
-  done
-  # 兜底: 直接清空整个状态目录内容(部分 ROM 把状态放单文件)
+  # ---- 对齐 vivo 排错手册步骤3/4: 备份 + 按"卡死文件"清单删除 + 清 tmp ----
+  PREFS=/data/misc/update_engine/prefs
+  if [ -d "$PREFS" ]; then
+    # 步骤3: 先备份整份 prefs, 万一清错可回滚
+    BAK="${PREFS}.bak.$(date +%s)"
+    cp -r "$PREFS" "$BAK" 2>/dev/null && log "  已备份 prefs -> $BAK"
+    # 步骤4: 按手册列出的"卡死文件"清单精确删除
+    # (update-state-* / payload_url / target-version / persist-update-errorcode /
+    #  payload-attempt-number / previous-version / 下载进度 / resumed-update-failures)
+    rm -f "$PREFS"/update-state-* \
+          "$PREFS"/payload_url \
+          "$PREFS"/target-version \
+          "$PREFS"/persist-update-errorcode \
+          "$PREFS"/payload-attempt-number \
+          "$PREFS"/previous-version \
+          "$PREFS"/current-bytes-downloaded \
+          "$PREFS"/total-bytes-downloaded \
+          "$PREFS"/resumed-update-failures 2>/dev/null
+    # 更彻底: prefs 下还有 manifest-bytes/update-state-next-*/caller_src/full-payload 等
+    # 大量残留, 备份后整体清空最稳妥 (手册步骤4 亦建议直接清空 prefs)。
+    rm -rf "$PREFS"/* 2>/dev/null
+    mkdir -p "$PREFS" 2>/dev/null
+    log "  已清空 $PREFS/* (备份见 $BAK)"
+  fi
+  # 步骤4: 清空临时目录
+  rm -f /data/misc/update_engine/tmp/* 2>/dev/null
+  # 兜底: 直接删单文件形态的状态(部分 ROM 把状态放单文件)
   rm -f /data/misc/update_engine/update_engine_prefs 2>/dev/null
 }
 
@@ -655,6 +755,12 @@ stop_ue_log_tail() {
 }
 
 attempt_install() {
+  # 文档坑1 (90% 反复失败原因): 必须先停 com.bbk.updater, 否则它会持续抢占
+  # update_engine 并重新写回状态, 清完状态也会被它覆盖。am force-stop 无需恢复
+  # (系统更新会自行恢复; 只有 pm disable 才需要手动 enable)。
+  am force-stop com.bbk.updater 2>/dev/null
+  log "已停 com.bbk.updater (防止抢占 update_engine, 文档坑1)"
+  sleep 1
   # 仅当明确要强制重刷时才清状态; 否则只重启 daemon 以尽量保留"已应用等重启"的包
   if [ "$FORCE_REFRESH" = "1" ]; then
     clear_ue_state
@@ -670,13 +776,26 @@ attempt_install() {
     setprop ctl.start update_engine 2>/dev/null
     sleep 3
   fi
-  # 安装期间实时转发进度日志(双保险: 与下面 client --follow 的前台输出互补)
+  # 文档步骤5/6: launch 前必须 --cancel 探测, 清掉上一次"已取消但未清理干净"的会话,
+  # 避免残留会话干扰新安装。判读: "No ongoing update to cancel." + EXIT=248 或 EXIT=0
+  # = 引擎空闲(可); "Already processing an update" = 仍有抢占/残留 -> 提示并强制清一次。
+  OUT=$("$UPDATE_ENGINE_CLIENT" --cancel 2>&1); RC_C=$?
+  log "  [probe] launch 前 --cancel: $OUT (RC=$RC_C)"
+  case "$OUT" in
+    *"Already processing"*)
+      log "  ⚠ 探测到引擎仍被占用 (Already processing), 强制清理状态后重拉引擎 ..."
+      clear_ue_state
+      setprop ctl.start update_engine 2>/dev/null
+      sleep 3
+      ;;
+  esac
+  # 安装期间后台轮询日志实时转发进度 (替代 --follow 前台阻塞, 文档坑9)
   start_ue_log_tail
-  log "================ 以下为 update_engine 前台实时输出 ================"
+  log "================ 以下为 update_engine launch 输出 ================"
   run_client
   RC=$UE_RC
   stop_ue_log_tail
-  log "================ update_engine 前台输出结束 (RC=$RC) ==============="
+  log "================ update_engine launch 结束 (RC=$RC) ==============="
   return $RC
 }
 
@@ -856,7 +975,7 @@ if [ "$LK_ENABLED" = "1" ]; then
 fi
 
 # ---------- 9. 完成 ----------
-# 进度已通过 run_client --follow 前台实时输出 + 后台增量日志转发到终端, 无需再提示"正在写入"。
+# 进度已通过 run_client 后台 launch + start_ue_log_tail 增量转发到终端, 无需再提示"正在写入"。
 
 # 安装小结的运行环境头部 (复用: 重启/非重启两分支共用, 便于事后排查)。
 # 含: 包名/机型/型号/当前+目标 slot/返回码/ROOT 方案/证书绕过方式/thermal 阈值。
@@ -906,9 +1025,11 @@ print_install_env() {
 }
 
 # ---------- 7. 写入成功后必须手动切启动槽(核心闭环, 否则重启被回滚清空) ----------
-# 仅当写入成功(RC=0)且在 A/B 设备上才切; 失败/非 A/B 时跳过不阻断。
+# 仅当写入成功(RC=0/1/248 均为成功语义: 0/1=成功, 248=UPDATED_NEED_REBOOT 待重启)
+# 且在 A/B 设备上才切; 失败/非 A/B 时跳过不阻断。文档坑11: 状态到 UPDATED_NEED_REBOOT
+# 后必须立刻切槽, 否则 bootloader 仍从原槽启动 -> 引擎回滚清空刚写入的槽 (update-result 变 1)。
 SWITCH_RC=0
-if [ "$RC" = "0" ]; then
+if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
   switch_active_slot "$TARGET_SLOT"; SWITCH_RC=$?
   case "$SWITCH_RC" in
     0) : ;;                              # 切槽生效

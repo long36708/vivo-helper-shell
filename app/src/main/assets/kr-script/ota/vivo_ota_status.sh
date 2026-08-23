@@ -98,8 +98,6 @@ if [ "$ARG" = "stop" ]; then
     [ "$p" = "$PPID" ] && continue
     kill -9 "$p" 2>/dev/null && KILLED=$((KILLED+1))
   done
-  # 杀掉可能残留的 tail 子进程
-  pkill -9 -f "tail -F $UE_LOG_DIR" 2>/dev/null
   put "已停止 $KILLED 个监听实例。"
   exit 0
 fi
