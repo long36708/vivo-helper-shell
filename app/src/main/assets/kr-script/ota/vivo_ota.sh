@@ -206,6 +206,45 @@ locate_payload_in_zip() {
   return 1
 }
 
+# 写入完成后手动切启动槽 (AIDL boot control HAL), 并回读确认。
+# 背景: vivo/Android15 的 update_engine 跨机型强刷后不会自动 setActiveBootSlot,
+# 写入完成直接 reboot -> bootloader 仍从原槽启动 -> 引擎发现目标槽 pending 即
+# Removing all update state 把刚写入的槽全清(update-result 变 1, 写入白费)。
+# 故写入成功后必须手动切槽, 且以 getActiveBootSlot 回读为准(不要看 setActiveBootSlot 返回值)。
+# 入参: $1=目标 slot 名(_a/_b); 返回 0=生效, 1=HAL 拒绝(需重装再切), 2=无 AIDL 接口。
+switch_active_slot() {
+  local TS="$1"
+  [ -z "$TS" ] && { log "✗ 切槽失败: 未指定目标 slot"; return 1; }
+  local TNUM
+  case "$TS" in
+    _a) TNUM=0 ;;
+    _b) TNUM=1 ;;
+    *)  log "✗ 切槽失败: 非法 slot 名 '$TS' (仅 _a/_b)"; return 1 ;;
+  esac
+  # 探测 AIDL 接口名(不同 vivo 固件名可能不同, 不能写死)
+  local SVC
+  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+  [ -z "$SVC" ] && { log "⚠ 切槽跳过: 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧)"; return 2; }
+  log "切启动槽: 调 $SVC setActiveBootSlot($TNUM) -> $TS"
+  # 即便 setActiveBootSlot 返回非0(如 00000002), 以 getActiveBootSlot 回读为准
+  service call "$SVC" 3 i32 "$TNUM" >/dev/null 2>&1
+  sleep 1
+  local RAW ACTIVE CUR
+  RAW=$(service call "$SVC" 1 2>/dev/null | grep -oE '0x[0-9a-fA-F]+|[0-9]{6,}' | tail -n1)
+  ACTIVE=$(printf '%s' "$RAW" | grep -o '[01]$')
+  log "  getActiveBootSlot 回读: ${RAW:-未知} (归一=${ACTIVE:-?})"
+  if [ "$ACTIVE" = "$TNUM" ]; then
+    CUR=$(service call "$SVC" 2 2>/dev/null | grep -o '[01]$')
+    [ -n "$CUR" ] && log "  当前运行槽(getCurrentSlot)=${CUR} (重启后才变)"
+    log "✅ 切槽生效: 下一次启动将进入 $TS"
+    return 0
+  else
+    log "✗ 切槽未生效: 回读=${ACTIVE:-?} 期望=${TNUM} (HAL 拒绝: 目标槽可能无有效镜像)"
+    log "  → 需回到安装步骤重新写入一次, 等 update-result=0 后再切槽; 切勿直接 reboot"
+    return 1
+  fi
+}
+
 # ---------- 0. 校验 ----------
 ROM="$1"
 [ -z "$ROM" ] && die "未选择 OTA 包 (param rom 为空)"
@@ -866,19 +905,46 @@ print_install_env() {
   fi
 }
 
+# ---------- 7. 写入成功后必须手动切启动槽(核心闭环, 否则重启被回滚清空) ----------
+# 仅当写入成功(RC=0)且在 A/B 设备上才切; 失败/非 A/B 时跳过不阻断。
+SWITCH_RC=0
+if [ "$RC" = "0" ]; then
+  switch_active_slot "$TARGET_SLOT"; SWITCH_RC=$?
+  case "$SWITCH_RC" in
+    0) : ;;                              # 切槽生效
+    2) log "⚠ 非 A/B 设备, 无需切槽, 直接重启即可。" ;;  # 无 AIDL 接口
+    1) log "🚨 切槽被 HAL 拒绝! 切勿直接重启, 否则刚写入的 $TARGET_SLOT 会被回滚清空。"
+       log "   请重新执行一次安装(等 update-result=0), 再切槽; 或改用 fastboot 硬切。"
+       # 标记: 阻止下面自动 reboot
+       SWITCH_BLOCK_REBOOT=1 ;;
+  esac
+else
+  log "ℹ 写入未完成(RC=$RC), 跳过切槽。"
+fi
+
 if [ "$6" = "1" ]; then
   # 重启模式: 先打印小结再重启(重启后终端/日志会中断, 故小结必须在 reboot 前)
   log "──────────── 安装小结 ────────────"
   print_install_env
-  log "✅ 包已写入目标槽, 即将重启使更新生效..."
-  sleep 3
-  reboot
+  if [ "$SWITCH_BLOCK_REBOOT" = "1" ]; then
+    log "🚨 因切槽未生效, 已阻止自动重启。请按上面提示处理后再重启, 避免写入被回滚。"
+  else
+    log "✅ 包已写入并切到目标槽 $TARGET_SLOT, 即将重启使更新生效..."
+    sleep 3
+    reboot
+  fi
 else
   # 非重启模式: 明确告知"已应用, 重启即生效"(借鉴 Custota reboot 通知),
   # 用户不勾 reboot 时最容易困惑"刷完没反应", 这里补上收尾提示 + 小结。
   log "──────────── 安装小结 ────────────"
   print_install_env
-  log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效。"
+  if [ "$SWITCH_RC" = "0" ]; then
+    log "✅ 包已写入并切到目标槽 $TARGET_SLOT, 重启设备即可生效。"
+  elif [ "$SWITCH_RC" = "2" ]; then
+    log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效(非 A/B 无需切槽)。"
+  else
+    log "⚠ 包已写入 $TARGET_SLOT, 但切槽未生效, 重启前请先解决切槽问题(见上方提示)。"
+  fi
   log "  若需放弃本次更新改刷其他包, 重启后状态机仍处待生效态, 可 FORCE=1 强制清状态重刷。"
 fi
 # 收尾引导: 告知中途控制(取消/暂停/恢复)入口所在, 因 kr-script 架构下这些是与安装

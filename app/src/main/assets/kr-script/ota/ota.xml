@@ -83,6 +83,13 @@
             <param name="rom" type="file" title="OTA 包路径" required="true" desc="待校验的 OTA zip 绝对路径" />
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_ctrl.sh" preflight "$rom"</set>
         </action>
+        <action title="手动切启动槽 (写入后必做)" desc="写入完成后用 AIDL boot control 把下一次启动槽切到目标槽并回读确认。vivo 跨机型强刷后 update_engine 不会自动切槽, 不切直接重启会被回滚清空。可在安装后、重启前手动执行/复核">
+            <param name="slot" type="select" title="目标启动槽" value="_a" desc="切到哪个槽: 一般为与当前 ro.boot.slot_suffix 相反的一侧(_a 或 _b)">
+                <option val="_a">_a</option>
+                <option val="_b">_b</option>
+            </param>
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_ctrl.sh" set_active_slot "$slot"</set>
+        </action>
         <action title="取消当前安装">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_cancel.sh"</set>
         </action>

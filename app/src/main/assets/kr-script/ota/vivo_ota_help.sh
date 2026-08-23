@@ -6,19 +6,22 @@ cat <<'EOF'
 本工具基于 vivo 自研的 A/B OTA 通道 update_engine_client 实现，
 而非像通用 KrScript 那样 patch update_engine 二进制证书。
 
-关键要点 (来自逆向分析):
-1. 错误89 (找不到 payload.bin):
-   - 必须用绝对路径 /system/bin/update_engine_client
-   - 工作目录必须 cwd=/ (否则相对路径解析失败)
-   - 优先解析 _streaming 条目, 残损包也能刷
+关键要点 (来自逆向分析 + 真机实测, 以 vivo_ota.sh 实际实现为准):
+1. 错误89 (附加载荷 / 相对路径):
+   - 实测根因: 脚本为规避 FUSE 大包读取不全, cd / 后用**相对路径**引用附带 payloads,
+     若这些附加 zip 缺失会报 89 (表象类似 "找不到 payload.bin", 但本质是引用文件缺失)。
+   - 绕过: 包整体经 zip 内 payload.bin 的 offset 直读, 附带 zip 缺失通常可忽略;
+     全程用绝对路径 /system/bin/update_engine_client 调用; 优先解析流式/Strored 条目。
 
 2. 错误92 (版本守护 / 降级拦截):
-   - 设置 persist.vivo.engmode=1 让 update_engine 跳过版本守护
+   - 正确做法: setprop ro.ota.allow_downgrade 1 (降级开关), 重启 update_engine 生效后再刷。
+   - 注意: persist.vivo.engmode=1 是**错误**的旧说法, vivo 该通道实际用 ro.ota.allow_downgrade。
    - 允许降级 / 跨大版本刷入
 
-3. 附加载荷:
-   - vivo OTA 含 modem/mcf/oem 等 zip, 需作为 --update-props
-     传给 update_engine_client, 否则刷完变砖/无信号
+3. 附加载荷 (extras):
+   - vivo 定制版 update_engine_client **不支持 --update-props** 参数 (会报未知 flag)。
+   - 故 modem/mcf/oem 等附加 zip 不在本通道下发, 脚本对 extras 直接跳过 (log 提示)。
+   - 这些固件由官方整包内的 payload 一并覆盖, 无需手动传 props。
 
 4. 通道:
    - 使用系统 update_engine_client (非 recovery), 写入空闲 slot(_a/_b 另一侧)
