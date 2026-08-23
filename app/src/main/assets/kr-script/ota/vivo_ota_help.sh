@@ -21,8 +21,9 @@ cat <<'EOF'
 
 3. 附加载荷 (extras):
    - vivo 定制版 update_engine_client **不支持 --update-props** 参数 (会报未知 flag)。
-   - 故 modem/mcf/oem 等附加 zip 不在本通道下发, 脚本对 extras 直接跳过 (log 提示)。
-   - 这些固件由官方整包内的 payload 一并覆盖, 无需手动传 props。
+   - 正确做法: 整包直传 zip, 由 update_engine 按 payload_properties.txt 指示
+     自动从 zip 内读取 modem/mcf/oem 等附加载荷 (错误89 规避, 无需手动传 props)。
+   - 勾"附带 OEM / 基带载荷"时脚本会列出引擎将自动读取的附加条目 (仅提示, 不另行下发)。
 
 4. 通道:
    - 使用系统 update_engine_client (非 recovery), 写入空闲 slot(_a/_b 另一侧)

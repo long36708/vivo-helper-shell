@@ -257,7 +257,7 @@ if [ "$ARG" = "summary" ]; then
   # (不依赖 tac/tail -r, toybox 可能无这两者; 用 awk 记录每段, 取最后一段)
   SUMMARY=$(awk '
     /──── 安装小结 ────/ { buf=""; inblk=1 }
-    inblk { buf = buf $0 "\n"; if (/^DONE$/) { lastbuf=buf; inblk=0 } }
+    inblk { buf = buf $0 "\n"; if (/\[vivo_ota\] DONE$/) { lastbuf=buf; inblk=0 } }
     END { printf "%s", lastbuf }
   ' "$MIRROR" 2>/dev/null)
   if [ -z "$SUMMARY" ]; then
