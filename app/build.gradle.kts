@@ -6,7 +6,7 @@ plugins {
 }
 
 val appId = "com.longmo.vivo.helper"
-val appVersionName = "0.3.0"
+val appVersionName = "0.3.2"
 
 fun gitCommitCount(): Int {
     return providers.exec {

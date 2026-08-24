@@ -75,6 +75,35 @@ color_stream() {
   done
 }
 
+# 引擎日志只转发关键行, 过滤底层细节噪声 (update_engine 一次全量包能刷上千行,
+# 逐行下载/校验/写入的 operation 细节对普通用户无意义且淹没进度/错误)。
+# 关键行判定(大小写不敏感): 进度 / 状态 / 终态 / 错误 / 轮转提示 / 失败归档上下文。
+is_key_line() {
+  lc=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  case "$lc" in
+    *"overall progress"*|*"progress"*|*"completed "*"operations"*|*"operations"*|*"bytes"*|\
+    *"update status"*|*"updatestatus"*|*"status:"*|*"action"*|*"actionprocessor"*|\
+    *"downloading"*|*"verifying"*|*"applying"*|*"finalizing"*|*"postinstall"*|\
+    *"updated_need_reboot"*|*"successfully applied"*|*"sendpayloadapplicationcomplete"*|\
+    *"update successfully"*|*"boot completed"*|*"waiting on markbootsuccessful"*|\
+    *"error"*|*"fail"*|*"失败"*|*"错误"*|*"fatal"*|*"denied"*|*"abort"*|*"kerrorcode"*|\
+    *"suspending"*|*"resuming"*|*"payload"*)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+# 关键行流: 仅命中 is_key_line 的行才着色 + 镜像, 其余丢弃。
+filter_stream() {
+  while IFS= read -r line; do
+    if is_key_line "$line"; then
+      paint_line "$line"
+      [ "$UE_LOG_WRITABLE" = "1" ] && printf '%s\n' "$line" >> "$UE_MIRROR"
+    fi
+  done
+}
+
 # 普通提示: 终端着色 + 纯文本写文件
 put() { paint_line "$*"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "$*" >> "$UE_MIRROR"; }
 
@@ -281,8 +310,8 @@ if [ "$ARG" = "status" ]; then
   put ""
   CUR=$(latest_log)
   if [ -n "$CUR" ]; then
-    put "==== 最新日志尾部: $CUR ===="
-    tail -n "$TAIL_LINES" "$CUR" 2>/dev/null | color_stream
+    put "==== 最新日志尾部(关键行): $CUR ===="
+    tail -n "$TAIL_LINES" "$CUR" 2>/dev/null | filter_stream
     put ""
     LASTP=$(grep -a 'overall progress' "$CUR" 2>/dev/null | tail -1)
     [ -n "$LASTP" ] && put "最近一条进度: $LASTP"
@@ -366,10 +395,11 @@ read_increment() {
   f="$1"; from="$2"; to="$3"
   cnt=$((to - from))
   [ "$cnt" -gt 0 ] 2>/dev/null || return 0
+  # 引擎日志量大, 实时跟随只转发关键行 (filter_stream), 避免刷屏/灌爆 ota.log
   if [ "$TAIL_C_OK" = "1" ]; then
-    tail -c +$((from + 1)) "$f" 2>/dev/null | color_stream
+    tail -c +$((from + 1)) "$f" 2>/dev/null | filter_stream
   else
-    dd if="$f" bs=1 skip="$from" count="$cnt" 2>/dev/null | color_stream
+    dd if="$f" bs=1 skip="$from" count="$cnt" 2>/dev/null | filter_stream
   fi
 }
 

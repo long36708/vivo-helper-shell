@@ -87,6 +87,41 @@ color_stream() {
   done
 }
 
+# 引擎日志只转发关键行, 过滤底层细节噪声 (文档坑: update_engine 逐行写下载/校验/
+# 写入/各 operation 细节, 一次全量包能刷出上千行, 终端与 /sdcard/ota.log 都被淹没)。
+# 关键行判定(大小写不敏感):
+#   进度: overall progress / progress / Completed * operations / bytes
+#   状态: status / UpdateStatus / ACTION / Downloading / Verifying / Applying / Finalizing
+#   终态: UPDATED_NEED_REBOOT / successfully applied / SendPayloadApplicationComplete
+#   错误: error / fail / 失败 / 错误 / fatal / denied / abort / kErrorCode
+#   其余底层行 (CowWriter/Extent/Partition/InstallOperation 等) 直接丢弃
+is_key_line() {
+  lc=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  case "$lc" in
+    *"overall progress"*|*"progress"*|*"completed "*"operations"*|*"operations"*|*"bytes"*|\
+    *"update status"*|*"updatestatus"*|*"status:"*|*"action"*|*"actionprocessor"*|\
+    *"downloading"*|*"verifying"*|*"applying"*|*"finalizing"*|*"postinstall"*|\
+    *"updated_need_reboot"*|*"successfully applied"*|*"sendpayloadapplicationcomplete"*|\
+    *"update successfully"*|*"boot completed"*|*"waiting on markbootsuccessful"*|\
+    *"error"*|*"fail"*|*"失败"*|*"错误"*|*"fatal"*|*"denied"*|*"abort"*|*"kerrorcode"*|\
+    *"suspending"*|*"resuming"*|*"payload"*)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+# 关键行流: 仅当某行命中 is_key_line 时才着色 + 镜像, 其余丢弃。
+# 这样既保留实时进度/状态/错误可见性, 又避免引擎底层细节刷屏/灌爆 ota.log。
+filter_stream() {
+  while IFS= read -r line; do
+    if is_key_line "$line"; then
+      paint_line "$line"
+      [ "$UE_LOG_WRITABLE" = "1" ] && printf '%s\n' "$line" >> "$UE_MIRROR"
+    fi
+  done
+}
+
 # log: 终端着色输出 + 纯文本写入镜像文件
 log() { paint_line "[vivo_ota] $*"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "[vivo_ota] $*" >> "$UE_MIRROR"; }
 die() { printf '%s%s%s\n' "$C_RED" "FAILED: $*" "$C_RST"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "FAILED: $*" >> "$UE_MIRROR"; exit 1; }
@@ -760,10 +795,11 @@ start_ue_log_tail() {
     tail_c_ok=0
     printf 'ab' | tail -c +2 2>/dev/null | grep -q 'b' 2>/dev/null && tail_c_ok=1
     emit() { # emit <file> <from> <count>
+      # 引擎底层日志量极大 (逐行下载/校验/写入), 只转发关键行到终端/镜像, 过滤细节噪声
       if [ "$tail_c_ok" = "1" ]; then
-        tail -c +$(( $2 + 1 )) "$1" 2>/dev/null | color_stream
+        tail -c +$(( $2 + 1 )) "$1" 2>/dev/null | filter_stream
       else
-        dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | color_stream
+        dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | filter_stream
       fi
     }
     cur=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
