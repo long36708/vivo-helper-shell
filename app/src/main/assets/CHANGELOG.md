@@ -1,5 +1,25 @@
 # 更新日志
 
+## v0.3.2 - 2026-08-25
+
+- 借鉴 vivo_dg_app 的降级安装设计，为 vivo OTA 安装新增两个开关（ota.xml / vivo_ota.sh 配套更新）：
+  - 属性伪装（SPF）：开启后在 `--headers` 追加伪造的 `ro.vivo.product.version` / `security_patch` / `anti_ver` / `device.name` 四项属性并 `resetprop` 写入，绕过部分机型对系统版本/防回滚/机型名的校验（此类校验失败可能触发数据清空）
+  - 恢复出厂（POWERWASH）：开启后 headers 追加 `POWERWASH=1`，OTA 应用完成自动触发 factory reset 清空用户数据（危险操作，默认关闭）
+- 两项能力默认关闭，以环境变量 `SPF` / `POWERWASH` 传入，不占用既有位置参数顺序；安装小结中展示其启用状态
+
+## v0.3.1 - 2026-08-24
+
+- 新增 veritymode 状态检查（kr-script/verity/get_veritymode.sh）：查看当前 veritymode（enforcing/disabled）及 LK 补丁点是否生效，DSU 修复专用
+- 新增 vivo DSU 工具箱子页面（kr-script/dsu/dsu.xml）：打开官方 DSU Loader、DSU Sideloader Plus、查看状态、环境前提检查、使用说明，各功能以子命令 action 提供，避免交互菜单在无 TTY 环境死循环
+- 两个脚本由 kr-script 根目录归位到独立目录（verity/、dsu/），并接入 home.xml 入口
+- veritymode 脚本修正 busybox 定位：由写死其他 app 私有目录改为优先使用引擎注入的 $BUSYBOX，回退本仓库自带 toolkit/busybox，最后回退系统 PATH，摆脱对外部 app 的依赖
+- 清理 veritymode 脚本中指向不存在文档（DSU_LK补丁_veritymode_disabled.md）的死引用提示
+
+## v0.3.0 - 2026-08-23
+
+- 重构 vivo OTA 安装流程（vivo_ota.sh 等）：规避引擎卡死与超时问题，安装流程更稳定
+- OTA 写入成功后支持手动切换启动槽并回读确认（ota.xml / vivo_ota_ctrl.sh / vivo_ota_help.sh 配套更新），校验刷入结果
+
 ## v0.2.1 - 2026-08-16
 
 - A/B 槽位管理脚本由 switch_ab.sh 替换为功能更全的 swab.sh（支持 active / 保护模式 / dump 等模式）

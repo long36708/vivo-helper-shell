@@ -16,6 +16,8 @@
             <param name="force" type="switch" title="强制重刷" desc="清空 update_engine 持久化状态后重新安装, 忽略'已应用等重启'的包(目标槽已刷过同包时可用, 否则变全量重写)" />
             <param name="lk" type="switch" title="刷入 LK (bootloader)" desc="开启后, 将你指定的 lk 镜像写入 LK 分区(风险操作, 需镜像与机型严格匹配)" />
             <param name="lk_img" type="file" title="LK 镜像" suffix="img" desc="选择要刷入的 lk( bootloader) 镜像文件; 多数 vivo 为独立 lk 分区, 若为 lk_a/lk_b 请用环境变量 LK_DEV 指定" />
+            <param name="spf" type="switch" title="属性伪装 (SPF)" desc="开启后在 headers 追加伪造的 ro.vivo.product.version / security_patch / anti_ver / device.name 四项属性并 resetprop 写入, 绕过部分机型对系统版本/防回滚/机型名的校验(此类校验失败可能触发数据清空)。借鉴 vivo_dg_app 的 SPF 开关" />
+            <param name="powerwash" type="switch" title="恢复出厂 (POWERWASH)" desc="⚠ 危险: 开启后 headers 追加 POWERWASH=1, OTA 应用完成自动触发 factory reset 清空用户数据。仅在明确需要恢复出厂时使用" />
             <set>
                 # 转换 bool 参数为 1/0
                 case "$downgrade" in 1|true|yes|on) dg=1;; *) dg=0;; esac
@@ -25,6 +27,8 @@
                 case "$reboot" in 1|true|yes|on) rb=1;; *) rb=0;; esac
                 case "$force" in 1|true|yes|on) fc=1;; *) fc=0;; esac
                 case "$lk" in 1|true|yes|on) lk=1;; *) lk=0;; esac
+                case "$spf" in 1|true|yes|on) spf=1;; *) spf=0;; esac
+                case "$powerwash" in 1|true|yes|on) pw=1;; *) pw=0;; esac
                 # root_part: init_boot(默认) 或 boot ; root_img: 用户选的已修补镜像路径
                 rp="${root_part:-init_boot}"
                 ri="$root_img"
@@ -49,7 +53,8 @@
                 fi
                 # START_DIR 为 app 私有目录根, 脚本已解压到 kr-script/ota/
                 # 参数序: rom dg ex ce rt rb fc rp ri lk li
-                sh "$START_DIR/kr-script/ota/vivo_ota.sh" "$rom" "$dg" "$ex" "$ce" "$rt" "$rb" "$fc" "$rp" "$ri" "$lk" "$li"
+                # SPF / POWERWASH 为环境变量(不占位置参数), 由 spf/pw 开关控制
+                SPF="$spf" POWERWASH="$pw" sh "$START_DIR/kr-script/ota/vivo_ota.sh" "$rom" "$dg" "$ex" "$ce" "$rt" "$rb" "$fc" "$rp" "$ri" "$lk" "$li"
             </set>
         </action>
     </group>

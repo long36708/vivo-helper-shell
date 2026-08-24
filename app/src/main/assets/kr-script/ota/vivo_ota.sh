@@ -12,6 +12,15 @@
 #   $6 = reboot     : 1=完成后重启
 #   $7 = force      : 1=强制重刷(清空 update_engine 持久化状态后重装, 忽略"已应用等重启"的包)
 #
+# 环境变量(开关类, 不占位置参数, 由 ota.xml 的 <set> 注入):
+#   SPF=1           : 属性伪装(Spoof Properties)。在 headers 追加 4 项 vivo 系统属性
+#                       (RO_VIVO_PRODUCT_VERSION / RO_VIVO_SECURITY_PATCH / RO_VIVO_ANTI_VER /
+#                       RO_VIVO_DEVICE_NAME), 并 resetprop 写入, 绕过部分机型对"系统版本/
+#                       安全补丁/防回滚版本/机型名"的校验(此类校验失败会触发数据清空)。
+#   POWERWASH=1     : 刷完恢复出厂设置。在 headers 追加 POWERWASH=1, update_engine 应用
+#                       完成后自动触发 factory reset(清空用户数据分区)。危险操作, 默认关闭。
+#   (借鉴 vivo_dg_app-v1.0 的 dg_install.sh 的 $5 SPF / $6 POWERWASH 设计, 改为环境变量形态)
+
 # 原理(依据真机逆向 update_engine 实测):
 #  - 错误89(附加载荷): update_engine 用相对路径读 system/etc/oem-all-in-one.txt,
 #    故必须 cwd=/ 且用系统 update_engine_client(绝不复制二进制)。
@@ -390,6 +399,65 @@ if [ -z "$HEADERS" ]; then
   log "  ⚠ headers 为空 (payload_properties.txt 缺失?)"
 fi
 [ -n "$HEADERS" ] || die "payload_properties.txt 校验头为空 (无法校验, 包损坏或非标准 OTA?)"
+
+# ---------- 4.5 属性伪装 (SPF) + 恢复出厂 (POWERWASH) ----------
+# 借鉴 vivo_dg_app-v1.0 的 dg_install.sh: 部分 vivo 机型在 ApplyPayload 阶段会校验
+#   ro.vivo.product.version / ro.vivo.security_patch / ro.vivo.anti_ver / ro.vivo.device.name
+# 等系统属性, 降级(或换号)后这些属性与包内期望值不符会被判失败, 严重时触发数据清空。
+# 做法: 在 headers 里追加 4 行伪造属性, update_engine 会据此写入目标槽的 vendor/odm 覆盖,
+# 同时 resetprop 即时写入当前系统, 绕过校验。POWERWASH=1 则令 update_engine 应用完后
+# 自动恢复出厂(清空用户数据)。两项默认关闭, 仅当环境变量显式 =1 时开启。
+# 注意: 这 4 项属性名取自 targets 设备实测的后缀 (各机型可能不同, 以 dg_install.sh 为准)。
+VIVO_PROP_SUFFIX=""
+
+spoof_append_header() { # key value
+  # 仅当该 key 尚未在 headers 中出现时才追加, 避免覆盖包内原生值
+  case "$HEADERS" in
+    *"$1"*) : ;;   # 已存在, 跳过
+    *) HEADERS="${HEADERS}
+$1=$2" ;;
+  esac
+}
+
+if [ "$SPF" = "1" ]; then
+  log "属性伪装(SPF): 伪造 vivo 系统属性以绕过机型/版本/防回滚校验"
+  if [ -z "$VIVO_PROP_SUFFIX" ]; then
+    for suf in \
+      ro.vivo.product.version \
+      ro.vivo.security_patch \
+      ro.vivo.anti_ver \
+      ro.vivo.device.name ; do
+      v=$(getprop "$suf" 2>/dev/null)
+      [ -n "$v" ] && spoof_append_header "$suf" "$v"
+    done
+  else
+    for suf in \
+      "RO_VIVO_PRODUCT_VERSION:ro.vivo.product.version" \
+      "RO_VIVO_SECURITY_PATCH:ro.vivo.security_patch" \
+      "RO_VIVO_ANTI_VER:ro.vivo.anti_ver" \
+      "RO_VIVO_DEVICE_NAME:ro.vivo.device.name" ; do
+      hdr="${suf%%:*}"; prop="${suf##*:}"
+      v=$(getprop "$prop" 2>/dev/null)
+      [ -n "$v" ] && spoof_append_header "$hdr" "$v"
+    done
+  fi
+  # 即时写入当前系统属性 (resetprop 优先, 否则 setprop), 使校验阶段能读到伪值
+  for suf in ro.vivo.product.version ro.vivo.security_patch ro.vivo.anti_ver ro.vivo.device.name ; do
+    v=$(getprop "$suf" 2>/dev/null)
+    [ -n "$v" ] || continue
+    if command -v resetprop >/dev/null 2>&1; then
+      resetprop "$suf" "$v" 2>/dev/null
+    else
+      setprop "$suf" "$v" 2>/dev/null
+    fi
+  done
+  log "  已追加 4 项 SPF 属性到 headers 并 resetprop 写入当前系统"
+fi
+
+if [ "$POWERWASH" = "1" ]; then
+  log "恢复出厂(POWERWASH): 将在 OTA 应用完成后触发 factory reset (⚠ 会清空用户数据!)"
+  spoof_append_header "POWERWASH" "1"
+fi
 
 # ---------- 5. 证书绕过 (可选; 对齐 GT: 多数官方多代号包用系统证书即可过) ----------
 # 经验: vivo PD2415/PD2419 等多代号同系包是带有效签名的官方包, update_engine 用系统
@@ -997,6 +1065,18 @@ print_install_env() {
     fi
   fi
   [ "$LK_ENABLED" = "1" ] && log "  已写入 LK: $LK_DEV_NODE"
+  # 属性伪装(SPF): 已在 headers 追加 4 项伪造属性并 resetprop, 绕过机型/版本/防回滚校验
+  if [ "$SPF" = "1" ]; then
+    log "  属性伪装(SPF): 已启用 (伪造 vivo 系统属性 + resetprop 写入)"
+  else
+    log "  属性伪装(SPF): 未启用"
+  fi
+  # 恢复出厂(POWERWASH): 应用完成后自动 factory reset, 清空用户数据
+  if [ "$POWERWASH" = "1" ]; then
+    log "  ⚠ 恢复出厂(POWERWASH): 已启用 (OTA 应用完成后将清空用户数据)"
+  else
+    log "  恢复出厂(POWERWASH): 未启用"
+  fi
   # 证书绕过方式: hexpatch > bind > 系统证书直装
   if [ "$CERT_ACTIVE" = "1" ]; then
     [ "$UE_PATCHED" = "1" ] && log "  证书绕过: hexpatch update_engine 路径"
