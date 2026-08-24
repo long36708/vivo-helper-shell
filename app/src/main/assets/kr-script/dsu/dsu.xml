@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<page title="vivo DSU 工具箱">
+    <resource file="file:///android_asset/kr-script/dsu/dsu.sh" />
+
+    <action title="打开官方 DSU Loader">
+        <desc>直接拉起 vivo 隐藏的官方 DSU Loader（GSI 选择界面），免 Root</desc>
+        <set>sh "$START_DIR/kr-script/dsu/dsu.sh" open</set>
+    </action>
+
+    <action title="打开 DSU Sideloader Plus">
+        <desc>拉起第三方 GSI 旁加载工具（需已安装，装镜像时最好有 Root）</desc>
+        <set>sh "$START_DIR/kr-script/dsu/dsu.sh" sideload</set>
+    </action>
+
+    <action title="查看 DSU / GSI 状态">
+        <desc>查看 GSI 是否运行中、已放置的镜像包等状态</desc>
+        <set>sh "$START_DIR/kr-script/dsu/dsu.sh" status</set>
+    </action>
+
+    <action title="环境前提检查">
+        <desc>检查动态分区 / system_update 服务 / GSI 源连通性 / Root 等 DSU 前提</desc>
+        <set>sh "$START_DIR/kr-script/dsu/dsu.sh" check</set>
+    </action>
+
+    <action title="使用说明">
+        <desc>打印 vivo DSU 工具箱的使用说明与注意事项</desc>
+        <set>sh "$START_DIR/kr-script/dsu/dsu.sh" info</set>
+    </action>
+</page>

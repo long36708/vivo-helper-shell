@@ -59,6 +59,7 @@
 
     <group title="快捷工具">
         <resource file="file:///android_asset/kr-script/wifi/wifi-pwd.sh" />
+        <resource file="file:///android_asset/kr-script/verity/get_veritymode.sh" />
         <action title="打开版本测试 (*#225#)">
             <desc>快速查看手机详细版本信息：型号、软件版本号、VGC 版本、编译时间等</desc>
             <script>
@@ -126,11 +127,20 @@
             <set>sh "$START_DIR/kr-script/wifi/wifi-pwd.sh"</set>
         </action>
 
+        <action title="veritymode 状态检查">
+            <desc>查看当前 veritymode（enforcing/disabled）及 LK 补丁点是否生效，DSU 修复专用（如需读取 LK 分区需 Root）</desc>
+            <set>sh "$START_DIR/kr-script/verity/get_veritymode.sh"</set>
+        </action>
+
         <resource file="file:///android_asset/kr-script/hidden/clear_adb_nonblocking_ffs.sh" />
         <action title="清除 adb nonblocking_ffs 残留" interruptible="false">
             <desc>清空 persist.adb.nonblocking_ffs 属性值，规避刷机属性残留检测（如小骨检测）对相关项的 FAIL/高风险报告</desc>
             <set>sh "$START_DIR/kr-script/hidden/clear_adb_nonblocking_ffs.sh"</set>
         </action>
+
+        <page config="dsu/dsu.xml" title="vivo DSU 工具箱">
+            <resource file="file:///android_asset/kr-script/dsu/dsu.sh" />
+        </page>
     </group>
 
 </nav>
