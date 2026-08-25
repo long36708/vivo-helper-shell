@@ -8,9 +8,12 @@
 #   $2 = downgrade  : 1=绕过版本守护(错误92)  ro.ota.allow_downgrade=true
 #   $3 = extras     : 1=收集附加载荷(modem/mcf/oem/dyn/vgc)
 #   $4 = cert       : 1=证书绕过(非官方包)  magiskboot hexpatch otacerts 路径
-#   $5 = root       : 1=刷完保留ROOT(KernelSU/Magisk boot 修补)
-#   $6 = reboot     : 1=完成后重启
-#   $7 = force      : 1=强制重刷(清空 update_engine 持久化状态后重装, 忽略"已应用等重启"的包)
+#   (原 $5 root 已移除: OTA 安装不再支持一并 ROOT, 避免假成功刷入修补 init_boot 触发校验报错
+#    及 ROOT 刷入失败阻断 LK 修补导致变砖; 需 ROOT 请单独用 KernelSU/Magisk 操作)
+#   $5 = reboot     : 1=完成后重启
+#   $6 = force      : 1=强制重刷(清空 update_engine 持久化状态后重装, 忽略"已应用等重启"的包)
+#   $7 = lk         : 1=刷入 LK(bootloader) 镜像 (参数随 root 移除前移 2 位)
+#   $8 = lk_img     : LK 镜像文件路径
 #
 # 环境变量(开关类, 不占位置参数, 由 ota.xml 的 <set> 注入):
 #   SPF=1           : 属性伪装(Spoof Properties)。在 headers 追加 4 项 vivo 系统属性
@@ -1086,19 +1089,18 @@ fi
 
 log "update_engine_client 返回 $RC ($(code_to_text "$RC"))"
 
-# ---------- 8. 保留 ROOT (由用户自选分区 + 指定已修补镜像, 不再内置自动修补) ----------
-# 参数:
-#   $5  = root 开关 (1=开启)
-#   $8  = 分区选择 (boot | init_boot, 默认 init_boot)
-#   $9  = 用户已修补好的镜像文件路径(必填, 用于写入目标分区)
-#   环境变量 ROOT_PART / ROOT_IMG 可单独覆盖
+# ---------- 8. 保留 ROOT (已移除, 2026-08-26) ----------
+# 移除原因:
+#   1) 之前"假成功"误判会把已修补的 init_boot 刷入, 之后平刷同包触发校验报错。
+#   2) init_boot ROOT 刷入失败时, 会阻止后续 LK 修补刷入, 存在变砖风险。
+# 故 OTA 安装不再支持一并 ROOT; 需要 ROOT 请单独用 KernelSU/Magisk 操作。
+# 脚本侧保留 ROOT_ENABLED=0 硬关闭, 即便通过环境变量误传入也不会执行写入。
+#   环境变量 ROOT_PART / ROOT_IMG 仍可单独覆盖, 但本开关恒为 0。
 ROOT_ENABLED=0
-[ "$5" = "1" ] && ROOT_ENABLED=1
-ROOT_PART="${ROOT_PART:-${8:-init_boot}}"
-ROOT_IMG="${ROOT_IMG:-$9}"
-
+ROOT_PART="${ROOT_PART:-init_boot}"
+ROOT_IMG="${ROOT_IMG:-}"
 if [ "$ROOT_ENABLED" = "1" ]; then
-  [ -n "$ROOT_IMG" ] || die "开启'保留 ROOT'后必须指定已修补的镜像文件路径 (第9参数 / ROOT_IMG)"
+  [ -n "$ROOT_IMG" ] || die "开启'保留 ROOT'后必须指定已修补的镜像文件路径 (ROOT_IMG)"
   [ -f "$ROOT_IMG" ] || die "指定的 ROOT 镜像不存在: $ROOT_IMG"
 
   case "$ROOT_PART" in
@@ -1117,20 +1119,19 @@ if [ "$ROOT_ENABLED" = "1" ]; then
 fi
 
 # ---------- 8.5 刷入 LK (bootloader) 镜像 ----------
-# 参数:
-#   $10 = lk 开关 (1=开启)
-#   $11 = 用户选定的 lk 镜像文件路径
+# 参数 (ROOT 三项移除后, 位置整体前移 2 位):
+#   $7  = lk 开关 (1=开启)
+#   $8  = 用户选定的 lk 镜像文件路径
 #   环境变量 LK_IMG / LK_DEV 可单独覆盖(LK_DEV 为精确设备节点, 跳过自动推断)
 # 注意: 多数 vivo 机型 lk 为独立(非 A/B)分区, 无 slot 后缀; 若机型为 lk_a/lk_b 可设 LK_DEV 精确指定。
-# 重要: 第 10/11 个位置参数必须用 ${10}/${11} (带大括号) 引用。
-#   裸写 $10 在 POSIX shell 里会被解析为 "$1" 后接字面字符 '0', 永远不等于 "1",
-#   导致 LK_ENABLED 始终为 0、LK 分支被整体跳过、界面无 LK 日志 (这正是"勾选 LK 却没日志"的原因)。
+# 注: 之前因参数序靠后需用 ${10}/${11}; 现前移到 $7/$8, 可直接引用,
+#   保留带大括号写法 ${7}/${8} (POSIX 下 $7 也合法)。
 LK_ENABLED=0
-[ "${10}" = "1" ] && LK_ENABLED=1
-LK_IMG="${LK_IMG:-${11}}"
+[ "${7}" = "1" ] && LK_ENABLED=1
+LK_IMG="${LK_IMG:-${8}}"
 
 if [ "$LK_ENABLED" = "1" ]; then
-  [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第11参数 / LK_IMG)"
+  [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
   [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
 
   if [ -n "$LK_DEV" ]; then

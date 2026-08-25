@@ -6,12 +6,18 @@
             <param name="downgrade" type="switch" value="true" label="强制降级 / 跨版本安装" title="强制降级 / 跨版本安装" desc="勾选后设置 ro.ota.allow_downgrade=true(需KernelSU/Magisk resetprop)绕过版本守护(vivo 错误92)" />
             <param name="extras" type="switch" value="true" label="附带 OEM / 基带载荷" title="附带 OEM / 基带载荷" desc="勾选后自动收集 common/modem.zip、mcf_ota.zip、oem_zip/oem|dyn|vgc 等附加载荷(错误89关键)" />
             <param name="cert" type="switch" value="true" label="证书绕过 (非官方包)" title="证书绕过 (非官方包)" desc="勾选后用 magiskboot hexpatch 把 update_engine 的 otacerts 路径改为自签证书, 仅第三方/非官方包需要" />
+            <!--
+            ROOT 选项已移除 (2026-08-26):
+            - 之前假成功误判导致已修补的 init_boot 被刷入, 之后平刷同包会触发校验报错。
+            - 另发现 init_boot ROOT 刷入失败时, 会阻止后续 lk 修补刷入, 存在变砖风险。
+            - 故不再支持 OTA 安装时一并 ROOT, 需要 ROOT 请单独操作。
             <param name="root" type="switch" title="刷完保留 ROOT" desc="开启后, 将你指定的已修补镜像写入对应分区(不再内置自动修补)" />
             <param name="root_part" type="select" title="ROOT 分区" value="init_boot" desc="选择写入哪个分区: init_boot(默认, GKI 内核) 或 boot(非 GKI)">
                 <option val="init_boot">init_boot (默认, GKI 内核)</option>
                 <option val="boot">boot (非 GKI)</option>
             </param>
             <param name="root_img" type="file" title="已修补的 ROOT 镜像" suffix="img" desc="选择已用 KernelSU/Magisk 修补好的 boot/init_boot 镜像文件, 将写入目标 slot 对应分区" />
+            -->
             <param name="reboot" type="switch" title="刷完自动重启" desc="安装完成后自动重启进入新系统" />
             <param name="force" type="switch" title="强制重刷" desc="清空 update_engine 持久化状态后重新安装, 忽略'已应用等重启'的包(目标槽已刷过同包时可用, 否则变全量重写)" />
             <param name="lk" type="switch" title="刷入 LK (bootloader)" desc="开启后, 将你指定的 lk 镜像写入 LK 分区(风险操作, 需镜像与机型严格匹配)" />
@@ -23,15 +29,12 @@
                 case "$downgrade" in 1|true|yes|on) dg=1;; *) dg=0;; esac
                 case "$extras" in 1|true|yes|on) ex=1;; *) ex=0;; esac
                 case "$cert" in 1|true|yes|on) ce=1;; *) ce=0;; esac
-                case "$root" in 1|true|yes|on) rt=1;; *) rt=0;; esac
                 case "$reboot" in 1|true|yes|on) rb=1;; *) rb=0;; esac
                 case "$force" in 1|true|yes|on) fc=1;; *) fc=0;; esac
                 case "$lk" in 1|true|yes|on) lk=1;; *) lk=0;; esac
                 case "$spf" in 1|true|yes|on) spf=1;; *) spf=0;; esac
                 case "$powerwash" in 1|true|yes|on) pw=1;; *) pw=0;; esac
-                # root_part: init_boot(默认) 或 boot ; root_img: 用户选的已修补镜像路径
-                rp="${root_part:-init_boot}"
-                ri="$root_img"
+                # 注: ROOT 选项(原 rt/rp/ri)已移除, OTA 安装不再支持一并 ROOT
                 li="$lk_img"
                 # ---------- 危险提示: 未勾选 LK 且未选择 LK 镜像 ----------
                 # 部分 vivo 机型若不刷入与当前固件匹配的 LK (bootloader), 安装后可能因
@@ -52,9 +55,9 @@
                   fi
                 fi
                 # START_DIR 为 app 私有目录根, 脚本已解压到 kr-script/ota/
-                # 参数序: rom dg ex ce rt rb fc rp ri lk li
+                # 参数序: rom dg ex ce rb fc lk li (ROOT 三项已移除, 故 lk 前移到第7位)
                 # SPF / POWERWASH 为环境变量(不占位置参数), 由 spf/pw 开关控制
-                SPF="$spf" POWERWASH="$pw" sh "$START_DIR/kr-script/ota/vivo_ota.sh" "$rom" "$dg" "$ex" "$ce" "$rt" "$rb" "$fc" "$rp" "$ri" "$lk" "$li"
+                SPF="$spf" POWERWASH="$pw" sh "$START_DIR/kr-script/ota/vivo_ota.sh" "$rom" "$dg" "$ex" "$ce" "$rb" "$fc" "$lk" "$li"
             </set>
         </action>
     </group>
@@ -72,7 +75,7 @@
         <action title="历史进度日志列表" desc="列出全部历史日志与失败归档, 便于取消后回看">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" list</set>
         </action>
-        <action title="本次安装小结查看" desc="提取最近一次安装写入的结构化小结(包名/机型/槽位/返回码/ROOT/LK 保留情况), 安装后未重启也可随时回看">
+        <action title="本次安装小结查看" desc="提取最近一次安装写入的结构化小结(包名/机型/槽位/返回码/LK 写入情况), 安装后未重启也可随时回看">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_status.sh" summary</set>
         </action>
         <action title="最近失败详情查看" desc="直接 cat 最近一次安装失败 dump 到 update_engine_log_err/ 的错误归档, 省去手动翻目录">
