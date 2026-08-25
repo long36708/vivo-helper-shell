@@ -414,10 +414,16 @@ fi
 
 # 文档坑10: OTA 包 >6GB 走 /storage/emulated/0/ (FUSE) 会报 kDownloadTransferError,
 # 必须改用 /data/media/0/ 路径 (同一份文件, 绕过 FUSE 大文件读取坑)。
+# (注: /data/media/0 是 f2fs 物理路径; 8/23 成功即用此路径)
 case "$PAYLOAD_FILE" in
   /storage/emulated/0/*)
-    PAYLOAD_FILE="/data/media/0/${PAYLOAD_FILE#/storage/emulated/0/}"
-    log "  payload 路径已从 /storage/emulated/0/ 转换为 /data/media/0/ (大包 FUSE 规避, 文档坑10)"
+    _F="/data/media/0/${PAYLOAD_FILE#/storage/emulated/0/}"
+    if [ -f "$_F" ]; then
+      PAYLOAD_FILE="$_F"
+      log "  payload 路径已从 /storage/emulated/0/ 转换为 /data/media/0/ (大包 FUSE 规避, 文档坑10)"
+    else
+      log "  ⚠ /data/media/0 下未找到对应文件, 保持原路径继续"
+    fi
     ;;
 esac
 
@@ -429,6 +435,24 @@ esac
 HEADERS=$(unzip -p "$ROM" "payload_properties.txt" 2>/dev/null | sed '/^[[:space:]]*$/d')
 log "payload.bin -> $PAYLOAD_FILE (offset模式=$USE_OFFSET)"
 log "headers(${#HEADERS}字节): ${HEADERS:-<空>}"
+# ZIP64 修正: payload.bin 为 ZIP64 条目(>4GB)时, 本地头 csize/usize=0xFFFFFFFF,
+# 32 位 shell 算术溢出成 -1, 导致 --size=-1 被引擎按"读到文件尾"处理, 与 zip 内
+# payload 之后的其他条目冲突 -> kDownloadTransferError。改用 payload_properties.txt
+# 里的权威 FILE_SIZE 覆盖 (与 payload 头 FILE_SIZE 一致, 引擎本就要校验)。
+if [ "$USE_OFFSET" = "1" ]; then
+  _FSIZE=$(printf '%s\n' "$HEADERS" | grep -m1 '^FILE_SIZE=' | cut -d= -f2)
+  case "$_FSIZE" in
+    ''|*[!0-9]*)
+      log "  ⚠ 未从 payload_properties 取到 FILE_SIZE, 保持原 PAYLOAD_SIZE=${PAYLOAD_SIZE:-?}"
+      ;;
+    *)
+      if [ "${PAYLOAD_SIZE:-x}" != "$_FSIZE" ]; then
+        log "  ZIP64 修正: PAYLOAD_SIZE=${PAYLOAD_SIZE:-<无效>} -> $_FSIZE"
+        PAYLOAD_SIZE="$_FSIZE"
+      fi
+      ;;
+  esac
+fi
 
 if [ -z "$HEADERS" ]; then
   log "  ⚠ headers 为空 (payload_properties.txt 缺失?)"
@@ -645,6 +669,7 @@ run_client() {
   fi
   # launch 成功 (EXIT=0): 引擎已在后台接受并开始安装, 轮询日志等待终态
   # (替代 --follow 阻塞; 文档坑9: 勿用 --follow 防超时误 cancel)。
+  record_log_anchor
   wait_engine_done
   UE_RC=$?
   return $UE_RC
@@ -660,10 +685,44 @@ run_client() {
 #   5) 超时(默认 1800s=30 分钟, 覆盖 10GB 全量包 10~30 分钟耗时; OTA_WAIT_TIMEOUT 可覆盖)
 #      -> 不判失败(让用户看进度)。
 WAIT_ERR_SEEN=""
+
+# 记录 apply 发起后的日志锚点: 只检查锚点【之后】的新日志, 避免把引擎启动阶段
+# CleanupPreviousUpdateAction 写下的 SendPayloadApplicationComplete [0]
+# (并非本次安装完成) 误判为成功 -> 假成功导致提前写 ROOT/切槽、漏掉后台传输错误。
+UE_ANCHOR_FILE=""
+UE_ANCHOR_OFF=0
+record_log_anchor() {
+  local f
+  f=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+  UE_ANCHOR_FILE="$f"; UE_ANCHOR_OFF=0
+  [ -n "$f" ] && UE_ANCHOR_OFF=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  # 快照已有失败归档, 只把本次新增的当失败依据 (避免旧归档误判)
+  WAIT_ERR_SEEN=""
+  for _ef in "$UE_ERR_DIR"/*; do
+    [ -f "$_ef" ] && WAIT_ERR_SEEN="$WAIT_ERR_SEEN $_ef"
+  done
+}
+
+# 检查【锚点之后】新增日志是否命中正则 $1; 0=命中, 1=未命中。引擎轮转出新文件时按全新处理。
+new_log_grep() {
+  local pat="$1" f size
+  f=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+  [ -z "$f" ] && return 1
+  if [ "$f" = "$UE_ANCHOR_FILE" ]; then
+    size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    [ -z "$size" ] && return 1
+    { [ "$size" -le "$UE_ANCHOR_OFF" ] 2>/dev/null; } && return 1
+    tail -c +$((UE_ANCHOR_OFF + 1)) "$f" 2>/dev/null | grep -aqE "$pat" && return 0
+    return 1
+  fi
+  grep -aqE "$pat" "$f" 2>/dev/null && return 0
+  return 1
+}
+
 wait_engine_done() {
   local timeout="${OTA_WAIT_TIMEOUT:-1800}" waited=0 L ur code
   while [ "$waited" -lt "$timeout" ] 2>/dev/null; do
-    # (1) 失败归档
+    # (1) 失败归档 (仅本次新增)
     if [ -d "$UE_ERR_DIR" ]; then
       for f in "$UE_ERR_DIR"/*; do
         [ -f "$f" ] || continue
@@ -679,21 +738,31 @@ wait_engine_done() {
         esac
       done
     fi
-    # (2)/(3) 终态: 成功标记
     L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
     if [ -n "$L" ]; then
-      if grep -aq 'UPDATED_NEED_REBOOT' "$L" 2>/dev/null; then
+      # 锚点之后出现"验证/证书失败" -> 返回 10 (触发证书回退)
+      if new_log_grep 'Failed to verify package'; then
+        log "⚠ 引擎日志出现验证/证书失败终态 (Failed to verify package)"
+        return 10
+      fi
+      # 锚点之后出现明确失败终态 -> 立即判失败 (修复: 之前会漏掉 kDownloadTransferError)
+      if new_log_grep 'ErrorCode::k[A-Za-z]*Error|Didn.t get enough bytes|Aborting processing due to failure|SendPayloadApplicationComplete \[[1-9][0-9]*\]'; then
+        log "⚠ 引擎日志出现失败终态 (传输/其他错误), 判定安装失败"
+        return 4
+      fi
+      # 成功终态: UPDATED_NEED_REBOOT
+      if new_log_grep 'UPDATED_NEED_REBOOT'; then
         log "✅ 引擎报告 UPDATED_NEED_REBOOT (写入完成, 等待重启生效)"
         return 248
       fi
-      if grep -aqE 'Update successfully applied|SendPayloadApplicationComplete \[0\]' "$L" 2>/dev/null; then
+      # 成功终态: 锚点之后的 SendPayloadApplicationComplete [0]
+      if new_log_grep 'Update successfully applied|SendPayloadApplicationComplete \[0\]'; then
         log "✅ 引擎报告写入成功 (SendPayloadApplicationComplete [0])"
         return 0
       fi
-      # (4) 引擎回 IDLE 但无成功标记 -> prefs/update-result 判定。
-      #     仅在"无进行中关键字"时才判定 IDLE, 避免命中历史 IDLE 行误判。
-      if grep -aqE 'UPDATE_STATUS_IDLE|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null \
-         && ! grep -aqE 'Downloading|Applying|Verifying|Finalizing|ActionProcessor|processing|postinstall' "$L" 2>/dev/null; then
+      # (4) 引擎回 IDLE 但无成功标记 -> prefs/update-result 判定 (仅看锚点后新内容)
+      if new_log_grep 'UPDATE_STATUS_IDLE|Boot completed, waiting on markBootSuccessful' \
+         && ! new_log_grep 'Downloading|Applying|Verifying|Finalizing|ActionProcessor|processing|postinstall'; then
         ur=$(cat /data/misc/update_engine/prefs/update-result 2>/dev/null)
         [ "$ur" = "0" ] && { log "✅ 引擎回到 IDLE 且 update-result=0 (成功)"; return 0; }
         log "⚠ 引擎回到 IDLE 且无成功标记 (update-result=${ur:-无}), 判定未完成"
@@ -930,7 +999,7 @@ ota89_cleanup_wrapper
 # 失败判定策略: 只有明确列入 FAIL_CODES 的错误码才视为失败, 其余一律当成功。
 # 业务错误码语义: 10=签名/证书校验失败, 15=rootfs验证失败, 89/92=状态机/slot冲突。
 # 其他(含 1、248=已应用等重启、以及任何未知值)都按正常处理, 不再误杀。
-FAIL_CODES="10 15 89 92"
+FAIL_CODES="4 9 10 15 89 92"
 is_fail_code() {
   local c="$1" f
   for f in $FAIL_CODES; do
@@ -946,6 +1015,8 @@ code_to_text() {
   case "$1" in
     0)   echo "成功 (SUCCESS)" ;;
     1)   echo "成功 (update_engine 以 1 退出但无其他失败迹象, 视为成功)" ;;
+    4)   echo "下载/传输错误 (kDownloadTransferError=4, 多因 payload 读取/大文件路径或 size 参数问题)" ;;
+    9)   echo "传输/解压错误或温控中止 (kDownloadPayloadDecompressionError/Thermal=9)" ;;
     10)  echo "签名/证书校验失败 (kErrorCode=10, Failed to verify package)" ;;
     15)  echo "新 rootfs 验证失败 (kNewRootfsVerificationError=15, 多因机型不匹配或附加载荷校验不过)" ;;
     89)  echo "读取附加载荷失败 (kErrorCode=89, Failed to get additional payloads)" ;;
@@ -997,6 +1068,12 @@ if is_fail_code "$RC"; then
       log "            (3) 降级模式下部分分区 version/hash 校验不过。"
       log "  建议: 换对应机型(PD2419)的包; 或补全 magiskboot 做更彻底的二进制 patch; 用 logcat 看具体哪份载荷失败。"
       die "update_engine_client 返回 15 (rootfs 验证失败, 多因机型不匹配或附加载荷校验未绕过)"
+      ;;
+    4)
+      die "update_engine_client 返回 4 (kDownloadTransferError: payload 读取/传输错误, 多因 offset/size 参数或大文件路径问题, 详见 update_engine_log)"
+      ;;
+    9)
+      die "update_engine_client 返回 9 (传输/解压/温控中止, 详见 update_engine_log)"
       ;;
     10)
       die "update_engine_client 返回 10 (Failed to verify package, 签名/证书校验失败)"
