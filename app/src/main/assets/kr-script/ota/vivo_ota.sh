@@ -12,8 +12,8 @@
 #    及 ROOT 刷入失败阻断 LK 修补导致变砖; 需 ROOT 请单独用 KernelSU/Magisk 操作)
 #   $5 = reboot     : 1=完成后重启
 #   $6 = force      : 1=强制重刷(清空 update_engine 持久化状态后重装, 忽略"已应用等重启"的包)
-#   $7 = lk         : 1=刷入 LK(bootloader) 镜像 (参数随 root 移除前移 2 位)
-#   $8 = lk_img     : LK 镜像文件路径
+#   $7 = lk         : 1=刷入 LK(bootloader) 镜像 (参数随 root 移除前移 3 位: 原 ${10})
+#   $8 = lk_img     : LK 镜像文件路径 (原 ${11})
 #
 # 环境变量(开关类, 不占位置参数, 由 ota.xml 的 <set> 注入):
 #   SPF=1           : 属性伪装(Spoof Properties)。在 headers 追加 4 项 vivo 系统属性
@@ -297,6 +297,11 @@ ROM="$1"
 [ -z "$ROM" ] && die "未选择 OTA 包 (param rom 为空)"
 [ -f "$ROM" ]  || die "OTA 包不存在: $ROM"
 [ -x "$UPDATE_ENGINE_CLIENT" ] || die "找不到 $UPDATE_ENGINE_CLIENT (非vivo/无root?)"
+
+# 参数序快照(排查位置参数错位用): rom=包路径 dg=降级 ex=附加载荷 ce=证书绕过
+# rb=完成后重启 fc=强制重刷 lk=刷入LK li=lk镜像路径
+# (教训: ROOT 三参数移除后曾发生 reboot/force 读错位, 详见 docs-dev/lessons-ota-size-zip64.md)
+log "参数快照: dg=$2 ex=$3 ce=$4 rb=$5 fc=$6 lk=$7 lk_img=$8"
 
 # ---------- 1. 解析 metadata ----------
 log "解析 META-INF/com/android/metadata ..."
@@ -835,11 +840,12 @@ clear_ue_state() {
   rm -f /data/misc/update_engine/update_engine_prefs 2>/dev/null
 }
 
-# 是否允许强制清状态重刷: 环境变量 FORCE=1 或第7参数(force)=1
-# 与第6参数(reboot)解耦, 二者互不影响。
+# 是否允许强制清状态重刷: 环境变量 FORCE=1 或第6参数(force)=1
+# 与第5参数(reboot)解耦, 二者互不影响。
+# (修订 2026-08-27: 此处原误读 $7(实际是 lk 开关), 会导致勾选 LK 意外触发清状态强制重刷)
 FORCE_REFRESH=0
 [ "${FORCE}" = "1" ] && FORCE_REFRESH=1
-[ "$7" = "1" ] && FORCE_REFRESH=1
+[ "$6" = "1" ] && FORCE_REFRESH=1
 
 # vivo 的 update_engine 是后台 daemon, 进度不回显到终端, 只落盘到:
 #   /logdata/recovery/update_engine_log/update_engine.*
@@ -1119,7 +1125,7 @@ if [ "$ROOT_ENABLED" = "1" ]; then
 fi
 
 # ---------- 8.5 刷入 LK (bootloader) 镜像 ----------
-# 参数 (ROOT 三项移除后, 位置整体前移 2 位):
+# 参数 (ROOT 三项移除后, 位置整体前移 3 位):
 #   $7  = lk 开关 (1=开启)
 #   $8  = 用户选定的 lk 镜像文件路径
 #   环境变量 LK_IMG / LK_DEV 可单独覆盖(LK_DEV 为精确设备节点, 跳过自动推断)
@@ -1237,8 +1243,9 @@ else
   log "ℹ 写入未完成(RC=$RC), 跳过切槽。"
 fi
 
-if [ "$6" = "1" ]; then
+if [ "$5" = "1" ]; then
   # 重启模式: 先打印小结再重启(重启后终端/日志会中断, 故小结必须在 reboot 前)
+  # (修订 2026-08-27: 此处原误读 $6(实际是 force 开关), 会导致勾"强制重刷"意外自动重启)
   log "──────────── 安装小结 ────────────"
   print_install_env
   if [ "$SWITCH_BLOCK_REBOOT" = "1" ]; then
