@@ -3,6 +3,7 @@
     <resource file="file:///android_asset/kr-script/slot/swab.sh" />
     <resource file="file:///android_asset/kr-script/clock/toggle_clock_seconds.sh" />
     <resource file="file:///android_asset/kr-script/toolkit/device_status.sh" />
+    <resource file="file:///android_asset/kr-script/toolkit/extra_dim.sh" />
 
     <menu>
         <option type="default" id="1" auto-off="true" shell="hidden" confirm="true">关机</option>
@@ -100,6 +101,19 @@
                 <option val="status">查看当前状态</option>
             </param>
             <set>sh "$START_DIR/kr-script/clock/toggle_clock_seconds.sh" "$mode"</set>
+        </action>
+
+        <action title="极暗模式 (Extra dim)">
+            <desc>通过 settings 控制 Reduce bright colors（极暗模式）。open 跳设置页无需 root；on/off/toggle/status 需 root 或 adb shell。如需设置强度请用 `sh extra_dim.sh level &lt;0-100&gt;`（命令行）</desc>
+            <param name="mode" type="select" value="open" required="true"
+                  title="操作模式" desc="选择要执行的操作">
+                <option val="open">跳转极暗模式设置页（无需 root）</option>
+                <option val="on">开启极暗（需 root）</option>
+                <option val="off">关闭极暗（需 root）</option>
+                <option val="toggle">开关切换（需 root）</option>
+                <option val="status">查看状态与强度</option>
+            </param>
+            <set>sh "$START_DIR/kr-script/toolkit/extra_dim.sh" "$mode"</set>
         </action>
 
         <resource file="file:///android_asset/kr-script/hidden/clear_adb_nonblocking_ffs.sh" />

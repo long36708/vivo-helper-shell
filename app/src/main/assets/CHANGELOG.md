@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.4.0 - 2026-08-30
+
+- 新增 vivo 电话暗码工具箱（secret_codes/secret_codes.xml 子页面）：集成文档确认可用的 13 个工程暗码（*#*#2288#*#*、*#*#113#*#*、*#*#4244#*#*、*#*#4636#*#*、*#*#5588#*#*、*#9966#、*#09#、*#0000#、*#06#、*#225#、*#558#、*#*#7777#*#*、*#*#112#*#*），点击即经拨号盘 intent 触发，主页以子页面入口呈现
+- kr-script 主页重构与分组优化：
+  - 暗码组拆为独立子页面（secret_codes.xml），主页不再堆砌 13 个 action
+  - 「vivo DSU」从快捷工具中拆出独立成组
+  - 主页分组按功能域重排：vivo OTA → 系统槽位 → vivo DSU → 快捷工具 → vivo 电话暗码
+- 设备状态检查（Root 权限 / A/B 激活槽位）内联脚本抽离为 toolkit/device_status.sh，主页改用 `<set>` 引用，消除最长一段内联脚本
+- 新增状态栏时间显秒切换（clock/toggle_clock_seconds.sh）：通过 settings 修改 Secure.CLOCK_SECONDS，支持 on/off/toggle/status，无需重启
+- 新增极暗模式 (Extra dim) 工具（toolkit/extra_dim.sh）：控制 Reduce bright colors，`open` 跳设置页无需 root，`on/off/toggle/status/level` 需 root 或 adb shell
+
 ## v0.3.3 - 2026-08-27
 
 - 修复 vivo OTA 安装脚本（vivo_ota.sh）位置参数错位（ROOT 三参数移除重排时的残留，仅 lk/lk_img 改对，reboot/force 漏改）：
