@@ -69,3 +69,13 @@
   - `-p a|b`：保护模式（successful_boot=0, tries=6，防变砖兜底）。
   - `-h`：帮助。
 - 旧的 `slot/switch_ab.sh` 已替换为功能更全的 `swab.sh`（额外支持 dump/active/protect 模式）。
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub Issues for this repo (`github.com/long36708/vivo-helper-shell`). See `docs-dev/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs-dev/agents/domain.md`.

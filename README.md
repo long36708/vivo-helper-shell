@@ -54,7 +54,7 @@
 
 ## 目录结构
 
-```
+```text
 app/src/main/assets/kr-script/
 ├── home.xml          # 主页：重启菜单 + OTA + 槽位 + 快捷工具
 ├── more.xml          # 更多：文档 / 工具 / 活动 / 致谢
