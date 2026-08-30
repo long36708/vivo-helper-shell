@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <nav title="主页">
     <resource file="file:///android_asset/kr-script/slot/swab.sh" />
+    <resource file="file:///android_asset/kr-script/clock/toggle_clock_seconds.sh" />
+    <resource file="file:///android_asset/kr-script/toolkit/device_status.sh" />
 
     <menu>
         <option type="default" id="1" auto-off="true" shell="hidden" confirm="true">关机</option>
@@ -57,6 +59,12 @@
         </page>
     </group>
 
+    <group title="vivo DSU">
+        <page config="dsu/dsu.xml" title="vivo DSU 工具箱">
+            <resource file="file:///android_asset/kr-script/dsu/dsu.sh" />
+        </page>
+    </group>
+
     <group title="快捷工具">
         <resource file="file:///android_asset/kr-script/wifi/wifi-pwd.sh" />
         <resource file="file:///android_asset/kr-script/verity/get_veritymode.sh" />
@@ -69,57 +77,7 @@
 
         <action title="设备状态检查">
             <desc>查看当前是否已获取 Root 权限，以及 A/B 分区当前激活的槽位</desc>
-            <script>
-                echo "===== Root 权限检查 ====="
-                if [ "$(id -u)" -eq 0 ] || command -v su &gt;/dev/null 2&gt;&amp;1; then
-                    if su -c "id -u" &gt;/dev/null 2&gt;&amp;1; then
-                        echo "Root: 已获取 (uid=$(su -c 'id -u'))"
-                    else
-                        echo "Root: su 存在但未授权"
-                    fi
-                else
-                    echo "Root: 未获取"
-                fi
-
-                echo ""
-                echo "===== A/B 分区激活槽位 ====="
-                # 优先从多种属性读取当前激活槽后缀 (_a / _b)
-                suffix=""
-                for p in ro.boot.slot_suffix ro.vendor.boot.slot_suffix ro.boot.slot; do
-                    v=$(getprop "$p" 2&gt;/dev/null)
-                    if [ -n "$v" ]; then
-                        suffix="$v"
-                        break
-                    fi
-                done
-
-                if [ -z "$suffix" ]; then
-                    # 尝试 bootctl（普通 shell 与 root 两种情况）
-                    cur=""
-                    if command -v bootctl &gt;/dev/null 2&gt;&amp;1; then
-                        cur=$(bootctl get-active-boot-slot 2&gt;/dev/null)
-                    fi
-                    if [ -z "$cur" ] &amp;&amp; command -v su &gt;/dev/null 2&gt;&amp;1; then
-                        cur=$(su -c "bootctl get-active-boot-slot" 2&gt;/dev/null)
-                    fi
-                    if [ -n "$cur" ]; then
-                        slot_name=$([ "$cur" = "0" ] &amp;&amp; echo "_a" || ([ "$cur" = "1" ] &amp;&amp; echo "_b" || echo ""))
-                        echo "当前激活槽位: slot $cur ${slot_name}"
-                        case "$cur" in
-                        0) echo "另一个槽位: slot 1 (_b)" ;;
-                        1) echo "另一个槽位: slot 0 (_a)" ;;
-                        esac
-                    else
-                        echo "未检测到 A/B 分区信息 (可能为单分区设备)"
-                    fi
-                else
-                    echo "当前激活槽位后缀: $suffix"
-                    case "$suffix" in
-                    *_a) echo "对应槽位: slot 0 (_a)，另一个为 slot 1 (_b)" ;;
-                    *_b) echo "对应槽位: slot 1 (_b)，另一个为 slot 0 (_a)" ;;
-                    esac
-                fi
-            </script>
+            <set>sh "$START_DIR/kr-script/toolkit/device_status.sh"</set>
         </action>
 
         <action title="查看已保存的 WiFi 密码">
@@ -132,14 +90,28 @@
             <set>sh "$START_DIR/kr-script/verity/get_veritymode.sh"</set>
         </action>
 
+        <action title="状态栏时间显秒切换">
+            <desc>通过 settings 修改 Secure.CLOCK_SECONDS 实时切换状态栏时间是否显示秒数，无需重启（vivo / Android 11+，部分 ROM 可能需 force-stop SystemUI）</desc>
+            <param name="mode" type="select" value="toggle" required="true"
+                  title="操作模式" desc="选择要执行的操作">
+                <option val="toggle">切换开关（默认）</option>
+                <option val="on">开启显秒</option>
+                <option val="off">关闭显秒</option>
+                <option val="status">查看当前状态</option>
+            </param>
+            <set>sh "$START_DIR/kr-script/clock/toggle_clock_seconds.sh" "$mode"</set>
+        </action>
+
         <resource file="file:///android_asset/kr-script/hidden/clear_adb_nonblocking_ffs.sh" />
         <action title="清除 adb nonblocking_ffs 残留" interruptible="false">
             <desc>清空 persist.adb.nonblocking_ffs 属性值，规避刷机属性残留检测（如小骨检测）对相关项的 FAIL/高风险报告</desc>
             <set>sh "$START_DIR/kr-script/hidden/clear_adb_nonblocking_ffs.sh"</set>
         </action>
+    </group>
 
-        <page config="dsu/dsu.xml" title="vivo DSU 工具箱">
-            <resource file="file:///android_asset/kr-script/dsu/dsu.sh" />
+    <group title="vivo 电话暗码">
+        <page config="secret_codes/secret_codes.xml" title="vivo 电话暗码">
+            <summary>拨号盘输入工程暗码触发隐藏功能（基于本机实测）。注意：*#558# 工程页的「恢复出厂设置」会清数据并丢失 Root</summary>
         </page>
     </group>
 

@@ -46,6 +46,7 @@
 | 2 | `<param name="x" type="bool" />` | `type="bool"` 不是组件库识别的开关类型，`ParamsSwitchRender` 不渲染，退化为 EditText，用户需手填 `true/false` | 开关用 `type="switch"`（与 `slot.xml` 一致） |
 | 3 | `<set>sh $START_DIR/kr-script/xxx.sh</set>`（路径无引号） | `$START_DIR` 若含空格会断词，脚本找不到 | `<set>sh "$START_DIR/kr-script/xxx.sh"</set>`（路径加双引号） |
 | 4 | 在 `<menu>` 内部放 `<resource>` | 被忽略，脚本不会被解压 | `<resource>` 放 `<nav>` 顶层或 `<page>` 内声明即可 |
+| 5 | 暗码 `tel:` 手写 URL 编码漏字符（如 `*#06#` 写成 `tel:%2A06%23` 漏开头 `#`；`*#*#2288#*#*` 写成 `tel:%2A%232288%23%2A%23%2A` 漏开头第二对 `*#`） | 拨号器收到错误暗码无法触发，实测 `*#*#2288#*#*` 变成 `*#2288#*#*` | `*`→`%2A`、`#`→`%23` 必须逐字符对应；模板见下「电话暗码 tel: 编码」节；**改完必须用脚本解码全量核对** |
 
 **参数类型速查**（组件库识别的 `type` 值）：
 - 文本：`text`；下拉：`select`（配 `<option>`）；开关：`switch`；文件：`file`（可配 `suffix`/`mime`）；文件夹：`folder`；包名：`package`。
@@ -55,6 +56,24 @@
 - [ ] 所有开关是否用 `type="switch"`（无 `bool`）？
 - [ ] 所有 `sh $START_DIR/...` 路径是否已加双引号？
 - [ ] 脚本 `<resource>` 是否在 `<nav>` 顶层或对应 `<page>` 内声明？
+- [ ] 所有 `tel:` 暗码是否用 `urllib.parse.unquote` 解码核对过（解码结果必须等于原暗码，逐字符）？
+
+### 电话暗码 tel: 编码（反复踩坑，务必照模板）
+
+用 `am start -a android.intent.action.DIAL -d "tel:..."` 触发工程暗码时，`*` 和 `#` 必须 URL 编码：`*`→`%2A`，`#`→`%23`。**手写替换极不可靠，已连续两次漏字符**，必须改完用脚本复核。
+
+正确模板（已修复）：
+- `*#XXXX#`        → `tel:%2A%23XXXX%23`
+- `*#*#XXXX#*#*`   → `tel:%2A%23%2A%23XXXX%23%2A%23%2A`
+- 也可用半明文（vivo 拨号器能处理，不必编码 `*`）：`tel:*%232288%23*%23*`
+
+复核方法（改完跑一次，确认解码 == 原暗码再提交/构建）：
+```python
+import re, urllib.parse
+t = open("app/src/main/assets/kr-script/secret_codes/secret_codes.xml", encoding="utf-8").read()
+for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
+    print(title.split("(")[0].strip(), "=>", urllib.parse.unquote(d))
+```
 
 ## A/B 槽位切换（slot/swab.sh）
 
