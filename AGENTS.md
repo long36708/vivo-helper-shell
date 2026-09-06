@@ -75,6 +75,33 @@ for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
     print(title.split("(")[0].strip(), "=>", urllib.parse.unquote(d))
 ```
 
+## OTA 强刷脚本（kr-script/ota/）
+
+### Boot Control HAL 事务码（PD2419 真机实测，2026-09-06）
+
+`service call android.hardware.boot.IBootControl/default <txn>`（服务名用 `service list | grep -i IBootControl` 探测，勿写死）：
+
+| txn | 方法 | 说明 |
+|-----|------|------|
+| 1 | getActiveBootSlot | 待生效槽（0=A, 1=B） |
+| 2 | getCurrentSlot | 当前运行槽 |
+| 4 | getSnapshotMergeStatus | 0=none 干净；非 0=有 pending 快照 |
+| 7 | isSlotMarkedSuccessful | 查询当前槽是否已标记成功 |
+| 8 | markBootSuccessful | **幂等**，解锁 CleanupPreviousUpdateAction 卡死的唯一开关 |
+| 9 | setActiveBootSlot | 切槽（`i32 <0|1>`）；swab.sh 同款，实测可用 |
+
+**不要用 txn 3**（getNumberSlots，只读）做切槽 —— vivo_ota.sh/vivo_ota_ctrl.sh 曾因此切槽从未真正下发。
+
+### 返回码 248 的双重语义（曾致假成功）
+
+`update_engine_client` 的**退出码** 248 = binder `Status(-8)` 失败（错误 54 "CleanupPreviousUpdateAction is running"、错误 65 "Already processing" 等），**不是** UPDATED_NEED_REBOOT。引擎真正接受安装时 launch 退出 0；"已应用待重启"只能由 `wait_engine_done` 从引擎日志终态判定（UPDATED_NEED_REBOOT / SendPayloadApplicationComplete [0]）。客户端任何非 0 退出码一律按失败处理（归一为 66，已列入 FAIL_CODES）。
+
+### CleanupPreviousUpdateAction 卡死（VAB 收尾死锁）
+
+引擎带未完成收尾启动时会卡在 `Boot completed, waiting on markBootSuccessful()`：当前槽未被标记 boot successful（正常由 update_verifier/framework 开机后调用）。此时 `--cancel`（错误 54）、`--reset_status`、强清 prefs、ctl.restart 全都解不开（重启后重进同一状态）。唯一解法：`service call $SVC 8`（markBootSuccessful，幂等）+ `update_engine_client --merge` 让收尾跑完，回 merge=none 的干净 IDLE 后才能提交新安装。推不动时补一次 `ctl.restart update_engine` 让它重排 cleanup（此时槽已 successful，会立即通过）。
+
+**因此**：安装脚本在 `sys.boot_completed!=1` 时不得停 com.bbk.updater / 杀引擎（它参与 markBootSuccessful 链路）；launch 前必须过 IDLE 闸（`ue_wait_idle`）；成功切槽/刷 LK 只能发生在引擎日志确认写入成功之后 —— 顺序反了（包被 741 拒收却去切槽+刷 lk）是变砖前提。
+
 ## A/B 槽位切换（slot/swab.sh）
 
 - 脚本依赖 busybox 的 `crc32` / `xxd`，且需 root（KernelSU / Magisk），脚本内部有自检。

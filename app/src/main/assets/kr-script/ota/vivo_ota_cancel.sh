@@ -27,13 +27,49 @@ else
   [ $RC -ne 0 ] && echo "注意: --cancel 返回 $RC"
 fi
 
-# 兜底: 证书绕过时脚本可能起过独立 update_engine 前台进程, --cancel 取消不到, 直接重启/杀掉
-echo "兜底重启 update_engine 服务 ..."
-setprop ctl.restart update_engine 2>/dev/null
-# 仅当存在独立 update_engine 前台进程(工具 nohup 启动的 --logtostderr 形态)时才杀, 避免误杀系统服务
-if pgrep -f 'update_engine --logtostderr' >/dev/null 2>&1; then
-  pkill -9 -f 'update_engine --logtostderr' 2>/dev/null
-  echo "已杀掉残留的独立 update_engine 前台进程"
+# CleanupPreviousUpdateAction 收尾不可取消(VAB merge, 引擎设计禁止打断):
+# 2026-09-06 复盘: 该状态下 --cancel 报错54, ctl.restart 只会让引擎重排 cleanup
+# 再次卡死(它一直等 markBootSuccessful)。真正的"取消"= 补 markBootSuccessful
+# (txn=8, 本机实测幂等)让收尾跑完 merge 回到干净 IDLE。
+SKIP_RESTART=0
+if echo "$OUT" | grep -q 'CleanupPreviousUpdateAction'; then
+  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+  echo "检测到引擎卡在 CleanupPreviousUpdateAction (等 markBootSuccessful), cancel 动不了, 走收尾解锁 ..."
+  if [ -n "$SVC" ]; then
+    echo "调 $SVC markBootSuccessful (txn=8, 幂等) 标记当前槽启动成功 ..."
+    service call "$SVC" 8 >/dev/null 2>&1
+  else
+    echo "⚠ 未找到 IBootControl 服务, 仅靠 --merge 收尾"
+  fi
+  if ! pgrep -x update_engine >/dev/null 2>&1; then
+    setprop ctl.start update_engine 2>/dev/null
+    sleep 3
+  fi
+  echo "执行 update_engine_client --merge 等待快照收尾 (有就合并/没有秒回; 合并期间勿重启断电) ..."
+  "$CLIENT" --merge 2>&1 | tail -n 5
+  OUT=$("$CLIENT" --cancel 2>&1); RC=$?
+  echo "$OUT"
+  case "$OUT" in
+    *"CleanupPreviousUpdateAction"*)
+      echo "⚠ 收尾仍未完成: 请正常重启设备, 开机后等 1-2 分钟让系统自动 markBootSuccessful, 切勿反复杀引擎/清状态。"
+      ;;
+    *)
+      echo "✅ 引擎已解除收尾卡死, 回到干净 IDLE, 可正常安装新包。"
+      ;;
+  esac
+  # 已走收尾解锁, 跳过下方兜底重启(重启引擎只会重排 cleanup, 无意义)
+  SKIP_RESTART=1
+fi
+
+if [ "$SKIP_RESTART" != "1" ]; then
+  # 兜底: 证书绕过时脚本可能起过独立 update_engine 前台进程, --cancel 取消不到, 直接重启/杀掉
+  echo "兜底重启 update_engine 服务 ..."
+  setprop ctl.restart update_engine 2>/dev/null
+  # 仅当存在独立 update_engine 前台进程(工具 nohup 启动的 --logtostderr 形态)时才杀, 避免误杀系统服务
+  if pgrep -f 'update_engine --logtostderr' >/dev/null 2>&1; then
+    pkill -9 -f 'update_engine --logtostderr' 2>/dev/null
+    echo "已杀掉残留的独立 update_engine 前台进程"
+  fi
 fi
 
 echo "已尝试取消并重启 update_engine。可用『查看安装进度』确认状态。"

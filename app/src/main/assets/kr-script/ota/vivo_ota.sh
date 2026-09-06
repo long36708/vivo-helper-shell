@@ -149,7 +149,8 @@ if [ -f "$INSTALL_LOCK" ]; then
     if pgrep -x update_engine >/dev/null 2>&1; then
       L=$(ls -t /logdata/recovery/update_engine_log/update_engine.* 2>/dev/null | head -1)
       if [ -n "$L" ]; then
-        # 终态(已空闲/已应用待重启) -> 视为无进行中安装, 残留 pid 是死锁, 清理放行
+        # 空闲/待重启/收尾卡死等待(markBootSuccessful)都属"非活跃安装" -> 残留 pid 视为
+        # 死锁, 清理放行; 收尾卡死由新实例的 IDLE 闸(ue_wait_idle)负责解锁
         if grep -qE 'UPDATE_STATUS_IDLE|UPDATED_NEED_REBOOT|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null; then
           ENGINE_BUSY=0
         else
@@ -274,7 +275,10 @@ switch_active_slot() {
   [ -z "$SVC" ] && { log "⚠ 切槽跳过: 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧)"; return 2; }
   log "切启动槽: 调 $SVC setActiveBootSlot($TNUM) -> $TS"
   # 即便 setActiveBootSlot 返回非0(如 00000002), 以 getActiveBootSlot 回读为准
-  service call "$SVC" 3 i32 "$TNUM" >/dev/null 2>&1
+  # 事务码对齐 swab.sh 真机实测映射: 9=setActiveBootSlot。
+  # (旧代码误用 3=getNumberSlots 只读接口, setActiveBootSlot 从未真正下发,
+  #  回读恒为旧值 -> 必然"切槽未生效"; 详见 AGENTS.md OTA 节事务码表)
+  service call "$SVC" 9 i32 "$TNUM" >/dev/null 2>&1
   sleep 1
   local RAW ACTIVE CUR
   RAW=$(service call "$SVC" 1 2>/dev/null | grep -oE '0x[0-9a-fA-F]+|[0-9]{6,}' | tail -n1)
@@ -672,8 +676,15 @@ run_client() {
   # 立即逐行着色显示 + 镜像文件 (实时性略低于管道, 但能拿到准确退出码, 且文件无颜色)
   color_stream < "$UE_OUT"
   if [ "$UE_RC" -ne 0 ]; then
-    log "  ⚠ launch 返回非 0 (RC=$UE_RC), 引擎可能未接受本次更新"
-    return $UE_RC
+    # 2026-09-06 复盘修复: 客户端退出码 248 = binder Status(-8) 失败(如错误54/65
+    # "Already processing"/"CleanupPreviousUpdateAction is running"), 并不是
+    # UPDATED_NEED_REBOOT! 旧代码直接 return $UE_RC, 248 不在 FAIL_CODES 里被一路
+    # 当"已应用待重启成功"放行 -> 包根本没写入就去刷 LK/切槽(变砖前提)。
+    # 引擎真正接受安装时 launch 退出 0; 成功终态一律由 wait_engine_done 从引擎日志判定。
+    log "  ✗ launch 失败 (RC=$UE_RC), 引擎未接受本次更新 (客户端非0退出码≠UPDATED_NEED_REBOOT)"
+    # attempt_install 以 RC=$UE_RC 取结果, 须同步改写 UE_RC (66 已列入 FAIL_CODES)
+    UE_RC=66
+    return 66
   fi
   # launch 成功 (EXIT=0): 引擎已在后台接受并开始安装, 轮询日志等待终态
   # (替代 --follow 阻塞; 文档坑9: 勿用 --follow 防超时误 cancel)。
@@ -769,7 +780,9 @@ wait_engine_done() {
         return 0
       fi
       # (4) 引擎回 IDLE 但无成功标记 -> prefs/update-result 判定 (仅看锚点后新内容)
-      if new_log_grep 'UPDATE_STATUS_IDLE|Boot completed, waiting on markBootSuccessful' \
+      # 注意: "waiting on markBootSuccessful" 不是 IDLE, 是 CleanupPreviousUpdateAction
+      # 的卡死等待行, 不能当成功/空闲信号 (2026-09-06 复盘; IDLE 闸已保证提交前无此状态)
+      if new_log_grep 'UPDATE_STATUS_IDLE' \
          && ! new_log_grep 'Downloading|Applying|Verifying|Finalizing|ActionProcessor|processing|postinstall'; then
         ur=$(cat /data/misc/update_engine/prefs/update-result 2>/dev/null)
         [ "$ur" = "0" ] && { log "✅ 引擎回到 IDLE 且 update-result=0 (成功)"; return 0; }
@@ -799,6 +812,17 @@ wait_engine_done() {
 # 已应用、正等重启生效", 此时应让用户去重启使其生效, 而不是清掉状态重刷(否则旧包可能白刷)。
 # 仅当用户明确传 FORCE=1 (环境变量) 或第7参数(force)=1 时, 才允许清状态强制重刷。
 clear_ue_state() {
+  # 安全闸 (2026-09-06 复盘): 引擎持有待合并快照(merge status≠none)时, 删 prefs 会
+  # 破坏 VAB 收尾, 且清完重启引擎只会重进 CleanupPreviousUpdateAction 卡死。
+  # 先走 markBootSuccessful+merge 正常收尾, 成功则无需强清; 失败才按 FORCE 语义继续。
+  if ! ue_merge_status_none; then
+    log "  [reset] ⚠ 检测到待合并快照 (merge status≠none), 先走正常收尾而非直接清状态"
+    if ue_wait_idle; then
+      log "  [reset] ✅ 收尾已完成, 引擎回干净 IDLE, 跳过强清"
+      return 0
+    fi
+    log "  [reset] ⚠ 正常收尾未完成, 继续强清状态 (有风险, 仅 FORCE 语义下应走到这)"
+  fi
   pkill -9 update_engine 2>/dev/null
   sleep 1
   # 官方清状态流程 (真机实测验证): 顺序必须是 cancel -> reset_status -> 删目录兜底。
@@ -936,12 +960,90 @@ stop_ue_log_tail() {
   UE_TAIL_PID=0
 }
 
+# ---------- 7.5 applypayload 前的"干净 IDLE"闸 (2026-09-06 真机复盘) ----------
+# 背景: 引擎若带着上次未完成的 Virtual A/B 收尾, 启动即调度 CleanupPreviousUpdateAction,
+# 卡在 "Boot completed, waiting on markBootSuccessful()" —— 当前槽未被标记 boot
+# successful(正常由 update_verifier/framework 开机后调用, 被本脚本杀引擎/停 updater 打断),
+# cleanup 永不结束 -> 引擎恒忙: --cancel 报错54, 新 applypayload 被错误65/741 拒收。
+# 此时 cancel/reset_status/强清 prefs 全都解不开(引擎重启后重进同一状态)。
+# 解法(复盘第五/六节): 手动补 markBootSuccessful(IBootControl txn=8, 真机实测幂等)
+# 让 cleanup 自然走完 merge 回到干净 IDLE, 再提交新安装。
+UE_HAL_SVC=""
+ue_hal_service() {
+  if [ -z "$UE_HAL_SVC" ]; then
+    UE_HAL_SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+  fi
+  [ -n "$UE_HAL_SVC" ]
+}
+
+# getSnapshotMergeStatus(txn=4, 实测映射): 返回 0=干净(none), 非0=有待合并快照
+ue_merge_status_none() {
+  ue_hal_service || return 0   # 无 HAL(非 A/B) 视为干净
+  local out ms
+  out=$(service call "$UE_HAL_SVC" 4 2>/dev/null)
+  ms=$(printf '%s' "$out" | sed -n 's/.*Result: *//p' | grep -oE '0x[0-9a-fA-F]+|[0-9a-fA-F]{8}|[0-9]+' | head -1 | sed 's/^0*//')
+  [ -z "$ms" ] && ms=0
+  [ "$ms" = "0" ]
+}
+
+# snapshotctl 官方判定 (不可用/无输出时回退成功, 由 HAL txn4 兜底)
+ue_snapshot_state_none() {
+  local out
+  out=$(snapshotctl dump 2>/dev/null | grep -i 'Update state' | tail -n1)
+  [ -z "$out" ] && return 0
+  printf '%s' "$out" | grep -qi 'none'
+}
+
+# IDLE 闸主流程: mark 当前槽成功 -> --merge 收尾(有就合并/没有秒回) -> 双通道校验 none。
+# 返回 0=干净可安装; 1=仍未就绪(调用方必须中止, 严禁带状态硬提交撞 741)。
+ue_wait_idle() {
+  log "  [idle-gate] 提交前闸: markBootSuccessful(txn=8, 幂等) + merge 收尾 + merge 状态校验"
+  if ! pgrep -x update_engine >/dev/null 2>&1; then
+    setprop ctl.start update_engine 2>/dev/null
+    sleep 3
+  fi
+  if ue_hal_service; then
+    service call "$UE_HAL_SVC" 8 >/dev/null 2>&1
+  else
+    log "  [idle-gate] ⚠ 未找到 IBootControl 服务, 仅依赖 --merge 收尾"
+  fi
+  "$UPDATE_ENGINE_CLIENT" --merge > "$TMP/ue_merge.out" 2>&1
+  MERGE_RC=$?
+  if [ "$MERGE_RC" -ne 0 ]; then
+    log "  [idle-gate] --merge 返回 $MERGE_RC: $(tail -n 2 "$TMP/ue_merge.out" 2>/dev/null | tr '\n' ' ')"
+  fi
+  if ue_merge_status_none && ue_snapshot_state_none; then
+    log "  [idle-gate] ✅ 引擎已回干净 IDLE (merge status=none)"
+    return 0
+  fi
+  # 收尾未完成: 补一次引擎重启让它重排 cleanup(当前槽已 successful, 会立即通过并收尾)
+  log "  [idle-gate] 收尾未完成, 重启引擎重排 cleanup 后再验一次 ..."
+  setprop ctl.restart update_engine 2>/dev/null
+  sleep 5
+  "$UPDATE_ENGINE_CLIENT" --merge > "$TMP/ue_merge.out" 2>&1
+  if ue_merge_status_none && ue_snapshot_state_none; then
+    log "  [idle-gate] ✅ 引擎已回干净 IDLE (merge status=none)"
+    return 0
+  fi
+  log "  [idle-gate] ✗ 引擎未回到干净 IDLE, 中止安装 (带状态硬提交只会被 741 拒收)"
+  log "  [idle-gate]   请正常重启设备, 开机后等待 1-2 分钟再重试; 切勿反复杀引擎/清状态。"
+  return 1
+}
+
 attempt_install() {
   # 文档坑1 (90% 反复失败原因): 必须先停 com.bbk.updater, 否则它会持续抢占
   # update_engine 并重新写回状态, 清完状态也会被它覆盖。am force-stop 无需恢复
   # (系统更新会自行恢复; 只有 pm disable 才需要手动 enable)。
-  am force-stop com.bbk.updater 2>/dev/null
-  log "已停 com.bbk.updater (防止抢占 update_engine, 文档坑1)"
+  # 但 2026-09-06 复盘修正: com.bbk.updater/update_verifier 正是开机后调用
+  # markBootSuccessful 的正常链路 —— 开机未完成就杀它, 当前槽会永远停在
+  # "未标记成功", 引擎卡死 CleanupPreviousUpdateAction。故仅当系统已完成启动
+  # (留足标记窗口)才停; 刚开机则跳过, 宁可晚一点装也不抢 markBootSuccessful。
+  if [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ]; then
+    log "⚠ sys.boot_completed!=1 (开机未完成), 跳过停 com.bbk.updater 以免打断 markBootSuccessful 链路"
+  else
+    am force-stop com.bbk.updater 2>/dev/null
+    log "已停 com.bbk.updater (防止抢占 update_engine, 文档坑1)"
+  fi
   sleep 1
   # 仅当明确要强制重刷时才清状态; 否则只重启 daemon 以尽量保留"已应用等重启"的包
   if [ "$FORCE_REFRESH" = "1" ]; then
@@ -960,10 +1062,15 @@ attempt_install() {
   fi
   # 文档步骤5/6: launch 前必须 --cancel 探测, 清掉上一次"已取消但未清理干净"的会话,
   # 避免残留会话干扰新安装。判读: "No ongoing update to cancel." + EXIT=248 或 EXIT=0
-  # = 引擎空闲(可); "Already processing an update" = 仍有抢占/残留 -> 提示并强制清一次。
+  # = 引擎空闲(可); "Already processing an update" = 仍有抢占/残留 -> 提示并强制清一次;
+  # "CleanupPreviousUpdateAction is running"(错误54) = VAB 收尾卡死, cancel/clear 都解不开,
+  # 只能走下方 IDLE 闸收尾解锁。
   OUT=$("$UPDATE_ENGINE_CLIENT" --cancel 2>&1); RC_C=$?
   log "  [probe] launch 前 --cancel: $OUT (RC=$RC_C)"
   case "$OUT" in
+    *"CleanupPreviousUpdateAction is running"*)
+      log "  ⚠ 引擎卡在 CleanupPreviousUpdateAction (等 markBootSuccessful), 强清 prefs 解不开, 交由 IDLE 闸收尾 ..."
+      ;;
     *"Already processing"*)
       log "  ⚠ 探测到引擎仍被占用 (Already processing), 强制清理状态后重拉引擎 ..."
       clear_ue_state
@@ -971,6 +1078,9 @@ attempt_install() {
       sleep 3
       ;;
   esac
+  # IDLE 闸 (2026-09-06 复盘第六节): 提交前必须确认引擎回干净 IDLE, 否则 applypayload
+  # 被错误 65/741 拒收, 客户端 RC=248 又会被旧逻辑误判成"已应用待重启成功"。
+  ue_wait_idle || die "引擎未回到干净 IDLE, 已中止安装 (详见 [idle-gate] 日志)"
   # 安装期间后台轮询日志实时转发进度 (替代 --follow 前台阻塞, 文档坑9)
   start_ue_log_tail
   log "================ 以下为 update_engine launch 输出 ================"
@@ -1006,9 +1116,10 @@ RC=$?
 ota89_cleanup_wrapper
 
 # 失败判定策略: 只有明确列入 FAIL_CODES 的错误码才视为失败, 其余一律当成功。
-# 业务错误码语义: 10=签名/证书校验失败, 15=rootfs验证失败, 89/92=状态机/slot冲突。
-# 其他(含 1、248=已应用等重启、以及任何未知值)都按正常处理, 不再误杀。
-FAIL_CODES="4 9 10 15 89 92"
+# 业务错误码语义: 10=签名/证书校验失败, 15=rootfs验证失败, 89/92=状态机/slot冲突,
+# 66=launch 被拒/引擎未接受(含旧逻辑误判成"成功"的客户端 RC=248, 见 run_client)。
+# 其他(含 1、248=引擎日志确认的已应用等重启、以及任何未知值)都按正常处理, 不再误杀。
+FAIL_CODES="4 9 10 15 66 89 92"
 is_fail_code() {
   local c="$1" f
   for f in $FAIL_CODES; do
@@ -1086,6 +1197,9 @@ if is_fail_code "$RC"; then
       ;;
     10)
       die "update_engine_client 返回 10 (Failed to verify package, 签名/证书校验失败)"
+      ;;
+    66)
+      die "update_engine 返回 66 (launch 被拒/引擎未接受: 状态机被占用或收尾卡死, 见上方 [probe]/[idle-gate]/launch 输出; 可用『取消当前安装』走收尾解锁, 或重启设备后再试)"
       ;;
     89|92)
       die "update_engine_client 返回 $RC (状态机/ slot 冲突, 通常需重启设备后再试)"

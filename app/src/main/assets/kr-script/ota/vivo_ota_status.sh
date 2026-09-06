@@ -140,7 +140,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # 引擎状态判定: 综合 init.svc / 进程 / update_engine_client --status
-#   输出到全局: UE_STATE (IDLE / UPDATING / NEED_REBOOT / STOPPED / UNKNOWN)
+#   输出到全局: UE_STATE (IDLE / UPDATING / NEED_REBOOT / CLEANUP / STOPPED / UNKNOWN)
 #              UE_STATE_RAW (client 原始输出)
 # ---------------------------------------------------------------------------
 detect_engine_state() {
@@ -159,7 +159,13 @@ detect_engine_state() {
     # 终态优先
     if grep -q 'UPDATED_NEED_REBOOT' "$L" 2>/dev/null; then
       UE_STATE=NEED_REBOOT
-    elif grep -qE 'UPDATE_STATUS_IDLE|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null; then
+    elif tail -40 "$L" 2>/dev/null | grep -q 'waiting on markBootSuccessful'; then
+      # 不是 IDLE! CleanupPreviousUpdateAction 卡死等待行 (2026-09-06 复盘):
+      # 引擎恒忙, 新安装会被 741 拒收, 需走『取消当前安装』的收尾解锁。
+      # 只看尾部 40 行: 该行是 cleanup 会话的启动日志, 正常收尾完成后会被后续行
+      # 推出窗口; 卡死时它始终停留在尾部 (卡死即无后续日志)。
+      UE_STATE=CLEANUP
+    elif grep -qE 'UPDATE_STATUS_IDLE' "$L" 2>/dev/null; then
       UE_STATE=IDLE
     elif grep -q 'suspending' "$L" 2>/dev/null; then
       # 暂停态优先于 UPDATING: 用户主动暂停后日志仍含 Downloading/ActionProcessor 等
@@ -191,6 +197,8 @@ show_engine_state() {
     UPDATING)    put "  正在安装中 ..." ; print_client_progress ;;
     SUSPENDED)   put "  安装已暂停 (SUSPENDED)。恢复请运行『恢复当前安装』。" ; print_client_progress ;;
     NEED_REBOOT) put "  已安装完成, 等待重启生效 (UPDATED_NEED_REBOOT)" ;;
+    CLEANUP)     put "  ⚠ 引擎卡在 CleanupPreviousUpdateAction (等 markBootSuccessful): 拒收一切新安装。" ;
+                 put "  解锁: 跑『取消当前安装』(自动 markBootSuccessful + --merge 收尾), 或正常重启后等 1-2 分钟。" ;;
     *)           put "  状态未知 (引擎在运行, 但 --status 查询失败)" ;;
   esac
   [ -n "$UE_STATE_RAW" ] && printf '%s\n' "$UE_STATE_RAW" | color_stream
@@ -446,6 +454,7 @@ while true; do
       NEED_REBOOT) put "[状态] 安装完成, 等待重启生效 (UPDATED_NEED_REBOOT)" ;;
       SUSPENDED)   put "[状态] 安装已暂停 (SUSPENDED), 运行『恢复当前安装』可继续" ; print_client_progress ;;
       IDLE)        put "[状态] 引擎空闲 (当前无进行中的更新)" ;;
+      CLEANUP)     put "[状态] ⚠ 引擎卡在 CleanupPreviousUpdateAction (等 markBootSuccessful), 拒收新安装; 跑『取消当前安装』解锁" ;;
       STOPPED)     put "[状态] 引擎未运行" ;;
     esac
     LAST_STATE="$UE_STATE"

@@ -136,7 +136,8 @@ case "$ARG" in
     [ -z "$SVC" ] && { put "${C_YEL}⚠ 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧), 跳过切槽。${C_RST}"; exit 2; }
     put "${C_BLU}切启动槽: $SVC setActiveBootSlot($TNUM) -> $TS${C_RST}"
     # 即便 setActiveBootSlot 返回非0(如 00000002), 以 getActiveBootSlot 回读为准
-    service call "$SVC" 3 i32 "$TNUM" >/dev/null 2>&1
+    # 事务码对齐 swab.sh 真机实测: 9=setActiveBootSlot (旧代码误用 3=getNumberSlots 只读)
+    service call "$SVC" 9 i32 "$TNUM" >/dev/null 2>&1
     sleep 1
     RAW=$(service call "$SVC" 1 2>/dev/null | grep -oE '0x[0-9a-fA-F]+|[0-9]{6,}' | tail -n1)
     ACTIVE=$(printf '%s' "$RAW" | grep -o '[01]$')
