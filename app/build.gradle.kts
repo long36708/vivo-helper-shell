@@ -63,8 +63,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // 暂时关闭混淆/资源收缩：kr-script 框架大量依赖 XML 反射解析，混淆后闪退；
+            // 后续如需开启，需补齐 core 模块的 proguard keep 规则再验证
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

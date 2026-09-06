@@ -142,6 +142,15 @@ class AdMobProvider : AdProvider {
     override fun initialize(context: Context) {
         // MobileAds.initialize 内部自己切线程，这里按官方示例放到 IO 协程避免阻塞主线程
         CoroutineScope(Dispatchers.IO).launch {
+            // debug 构建标记为测试设备：正式广告位也会返回测试广告，用于验证展示链路
+            // （新广告位初期 NO_FILL 时，release 无需改动，等填充恢复即可）
+            if (com.longmo.vivo.helper.BuildConfig.DEBUG) {
+                MobileAds.setRequestConfiguration(
+                    com.google.android.gms.ads.RequestConfiguration.Builder()
+                        .setTestDeviceIds(listOf("D9B0283C05B377BF44B6D8A9FE33EC64"))
+                        .build()
+                )
+            }
             MobileAds.initialize(context)
         }
         preloadAppOpen(context)
