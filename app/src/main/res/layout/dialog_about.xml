@@ -86,6 +86,16 @@
         style="?attr/materialButtonOutlinedStyle" />
 
     <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn_donate"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:layout_marginTop="12dp"
+        android:text="@string/btn_donate"
+        android:contentDescription="@string/donate_desc"
+        style="?attr/materialButtonOutlinedStyle" />
+
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/btn_reset_egg"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

@@ -26,4 +26,14 @@
     <string name="changelog_empty">暂无更新记录</string>
     <string name="egg_page_title">隐藏彩蛋</string>
     <string name="reset_egg">重置隐藏彩蛋</string>
+
+    <!-- 隐私政策与广告 -->
+    <string name="privacy_consent_title">隐私政策</string>
+    <string name="privacy_consent_message">欢迎使用 Vivo助手！本应用为免费开源的 ROOT 玩机工具箱。\n\n为维持开发，应用包含广告（开屏广告与「更多」页横幅广告，可随时关闭网络后仍正常使用）。广告 SDK 会收集设备标识符、IP 地址等必要信息用于广告投放，详见隐私政策。\n\n本应用所有脚本均在本地执行，不会上传你的任何数据。点击「同意」表示你已阅读并同意《隐私政策》。</string>
+    <string name="privacy_agree">同意</string>
+    <string name="privacy_disagree">不同意</string>
+    <string name="privacy_view_policy">查看隐私政策</string>
+    <string name="privacy_policy_url">https://github.com/long36708/vivo-helper-shell/blob/main/docs/privacy.md</string>
+    <string name="btn_donate">捐赠支持</string>
+    <string name="donate_desc">请截图收款码，打开微信「扫一扫」→ 相册选中截图即可打赏，感谢支持！</string>
 </resources>

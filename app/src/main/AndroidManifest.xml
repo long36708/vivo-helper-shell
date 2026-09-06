@@ -26,6 +26,12 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
+        <!-- AdMob App ID（gradle property ADMOB_APP_ID 覆盖；默认官方测试 ID，发布前必须替换） -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="${admobAppId}" />
+
+
         <activity
             android:name=".ActionPage"
             android:exported="true"

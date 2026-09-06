@@ -51,6 +51,13 @@ android {
         buildConfigField("String", "FRAMEWORK_VERSION", "\"$appVersionName\"")
         buildConfigField("int", "BUILD_COMMIT", gitCommitCount().toString())
 
+        // 广告变现：gradle.properties 可覆盖（ADMOB_APP_ID / ADMOB_APP_OPEN_ID / ADMOB_BANNER_ID）
+        // 默认全部为 AdMob 官方测试 ID，发布时换成后台申请的正式 ID
+        buildConfigField("boolean", "ADS_ENABLED", localProps.getProperty("ADS_ENABLED", "true"))
+        buildConfigField("String", "ADMOB_APP_OPEN_ID", "\"${localProps.getProperty("ADMOB_APP_OPEN_ID", "ca-app-pub-3940256099942544/9257395921")}\"")
+        buildConfigField("String", "ADMOB_BANNER_ID", "\"${localProps.getProperty("ADMOB_BANNER_ID", "ca-app-pub-3940256099942544/6300978111")}\"")
+        manifestPlaceholders["admobAppId"] = localProps.getProperty("ADMOB_APP_ID", "ca-app-pub-3940256099942544~3347511713")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -87,5 +94,6 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.constraintlayout)
     implementation(libs.material)
+    implementation(libs.play.services.ads)
     implementation(project(":core"))
 }

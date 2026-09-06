@@ -6,6 +6,7 @@ import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.net.Uri
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
@@ -13,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.longmo.vivo.helper.ad.AdManager
 import com.longmo.vivo.helper.databinding.ActivitySplashBinding
 import com.krscripts.core.executor.ScriptEnvironment
 import com.krscripts.core.shell.KeepShellPublic
@@ -53,7 +55,42 @@ class SplashActivity : ComponentActivity() {
         setContentView(binding.root)
         enableEdgeToEdge()
 
+        // 合规硬要求：隐私政策同意弹窗必须先于一切广告 SDK 初始化；
+        // 未同意前照常走启动流程，只是完全不初始化广告。
+        if (!AdManager.isPrivacyAgreed(this)) {
+            showPrivacyConsentDialog()
+        } else {
+            proceedStartup()
+        }
+    }
+
+    private fun proceedStartup() {
+        AdManager.ensureInitialized(this)
         checkPermissions()
+    }
+
+    private fun showPrivacyConsentDialog() {
+        val builder = MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.privacy_consent_title))
+            .setMessage(getString(R.string.privacy_consent_message))
+            .setCancelable(false)
+            .setPositiveButton(getString(R.string.privacy_agree)) { dialog, _ ->
+                dialog.dismiss()
+                AdManager.setPrivacyAgreed(this, true)
+                proceedStartup()
+            }
+            .setNegativeButton(getString(R.string.privacy_disagree)) { dialog, _ ->
+                dialog.dismiss()
+                // 不同意则不初始化广告 SDK，应用功能不受影响；下次冷启动会再次询问
+                AdManager.setPrivacyAgreed(this, false)
+                proceedStartup()
+            }
+            .setNeutralButton(getString(R.string.privacy_view_policy)) { _, _ ->
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(getString(R.string.privacy_policy_url))))
+                // 返回后重新弹出，等待用户做出选择
+                binding.root.post { showPrivacyConsentDialog() }
+            }
+        DialogHelper.animDialog(this, builder)
     }
 
     private fun checkPermissions() {
@@ -123,7 +160,13 @@ class SplashActivity : ComponentActivity() {
             } else {
                 binding.startStateText.text = getString(R.string.pop_started)
             }
-            gotoHome()
+            if (intent.getBooleanExtra("JumpActionPage", false)) {
+                // 快捷方式直达脚本页：不插广告，避免打断脚本执行
+                gotoHome()
+            } else {
+                // 正常启动：开屏广告有频控与超时兜底，未展示/失败时直接放行
+                AdManager.showAppOpenIfEligible(this@SplashActivity) { gotoHome() }
+            }
         }
 
     }

@@ -27,6 +27,7 @@ import androidx.viewpager2.adapter.FragmentStateAdapter
 import androidx.viewpager2.widget.ViewPager2
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.longmo.vivo.helper.databinding.ActivityMainBinding
+import com.longmo.vivo.helper.ad.AdManager
 import com.longmo.vivo.helper.util.chooseFilePath
 import com.krscripts.core.config.PageConfigReader
 import com.krscripts.core.config.PageConfigSh
@@ -102,6 +103,11 @@ class MainActivity : KrActivity() {
         }
     }
 
+    override fun onDestroy() {
+        AdManager.detachBanner()
+        super.onDestroy()
+    }
+
     override fun onResume() {
         super.onResume()
         // 彩蛋解锁/重置后，从彩蛋页或关于对话框返回时刷新一次菜单（无需 recreate，避免遮罩残留）
@@ -161,8 +167,22 @@ class MainActivity : KrActivity() {
         binding.viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 binding.bottomNavView.menu[position].isChecked = true
+                updateBannerVisibility(position)
             }
         })
+    }
+
+    // 广告 Banner 仅在「更多」页展示：该页是浏览/链接页，不承载脚本操作流程
+    private fun morePageIndex(): Int =
+        krScriptConfig.pageListConfig.indexOfFirst { it.pageConfigPath.contains("more") }
+
+    private fun updateBannerVisibility(position: Int) {
+        val moreIndex = morePageIndex()
+        if (moreIndex >= 0 && position == moreIndex) {
+            AdManager.attachBanner(this, binding.adBannerContainer)
+        } else {
+            binding.adBannerContainer.visibility = View.GONE
+        }
     }
 
     private fun getConfig(pageNode: PageNode): ConfigNode? {
@@ -363,6 +383,25 @@ class MainActivity : KrActivity() {
                 // 更新日志：点击后读取内置 CHANGELOG.md 并弹窗展示
                 layout.findViewById<MaterialButton>(R.id.btn_changelog)?.setOnClickListener {
                     showChangelogDialog()
+                }
+
+                // 捐赠支持：弹窗展示微信收款码（图片来自 assets，与「更多」页共用一份）
+                layout.findViewById<MaterialButton>(R.id.btn_donate)?.setOnClickListener {
+                    val dlgView = LayoutInflater.from(this).inflate(R.layout.dialog_donate, null)
+                    val qcodeView = dlgView.findViewById<android.widget.ImageView>(R.id.iv_wx_qcode)
+                    try {
+                        assets.open("kr-script/donate/wx_qcode.png").use { stream ->
+                            android.graphics.BitmapFactory.decodeStream(stream)?.let { qcodeView.setImageBitmap(it) }
+                        }
+                    } catch (_: Exception) {
+                        // 图片缺失时保持空白占位，不影响对话框打开
+                    }
+                    DialogHelper.animDialog(
+                        this,
+                        MaterialAlertDialogBuilder(this)
+                            .setView(dlgView)
+                            .setTitle(getString(R.string.btn_donate))
+                    )
                 }
 
                 aboutDialog = DialogHelper.animDialog(

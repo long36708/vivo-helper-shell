@@ -9,9 +9,20 @@
         <page link="https://1815192367.share.123pan.cn/123pan/xPMtVv-TyQQd" title="vivo-ota-tracker (APK 下载)" />
     </group>
 
+    <!-- 捐赠入口：微信收款码图片放 assets/kr-script/donate/，替换图片直接覆盖 wx_qcode.png -->
+    <group title="捐赠支持">
+        <image title="微信打赏" desc="同一台手机无法扫码：请截图本收款码，再打开微信「扫一扫」→ 相册，选中截图即可打赏。感谢支持！">
+            <src>donate/wx_qcode.png</src>
+            <scale>fitCenter</scale>
+        </image>
+    </group>
+
     <group title="活动">
         <page link="https://tokenrhythm.studio/i/rf_tr_8ONG-xcwEK78vCeCZVGMI2PI" title="OpenSquilla 限时活动 (免费 68 元 token)" />
         <page link="https://autoglm.ai/misc/autoclaw-invite?activity_id=autoclaw_fission&amp;channel=fission&amp;target_app=autoclaw&amp;target_app_version=1.17.8&amp;os=win&amp;IC=AZBA3UMR" title="AutoClaw 积分风暴 (邀好友无上限)" />
+        <page link="https://kktoken.cc/sign-up?aff=uzrd" title="AI 公益站 KKToken (注册送 token)" />
+        <page link="https://agentrouter.org/register?aff=NyFb" title="AI 公益站 AgentRouter (注册送 token)" />
+        <page link="https://api.justwoker.icu/register?aff=ncgq" title="AI 公益站 JustWoker (注册送 token)" />
     </group>
 
     <group title="致谢">

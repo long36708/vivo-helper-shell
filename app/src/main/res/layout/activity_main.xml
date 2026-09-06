@@ -19,8 +19,16 @@
         android:id="@+id/viewPager"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        app:layout_constraintBottom_toTopOf="@+id/bottom_nav_view"
+        app:layout_constraintBottom_toTopOf="@+id/ad_banner_container"
         app:layout_constraintTop_toBottomOf="@+id/toolbar" />
+
+    <!-- 广告 Banner 容器：仅在「更多」页展示，加载成功才可见（避免填充率低时留白） -->
+    <FrameLayout
+        android:id="@+id/ad_banner_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/bottom_nav_view" />
 
     <com.google.android.material.floatingactionbutton.FloatingActionButton
         android:id="@+id/fab"
