@@ -98,6 +98,9 @@
             </param>
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_ctrl.sh" set_active_slot "$slot"</set>
         </action>
+        <action title="设备信息快照 (排查)" desc="一次性输出 Updater 排查手册所需的本机关键属性、降级保护判定与 recovery 日志摘要, 零风险只读。用于排查「一直显示已是最新」(210)、检测失败、降级保护等问题">
+            <set>sh "$START_DIR/kr-script/ota/vivo_ota_device_info.sh"</set>
+        </action>
         <action title="取消当前安装">
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_cancel.sh"</set>
         </action>

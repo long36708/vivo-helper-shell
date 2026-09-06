@@ -5,12 +5,13 @@
     </group>
 
     <group title="工具">
-        <page link="https://zipbrowseronline.com/index.php" title="在线提取 OTA 包镜像 (boot/init_boot/lk)" />
+<!--        <page link="https://zipbrowseronline.com/index.php" title="在线提取 OTA 包镜像 (boot/init_boot/lk)" />-->
         <page link="https://1815192367.share.123pan.cn/123pan/xPMtVv-TyQQd" title="vivo-ota-tracker (APK 下载)" />
     </group>
 
     <group title="活动">
         <page link="https://tokenrhythm.studio/i/rf_tr_8ONG-xcwEK78vCeCZVGMI2PI" title="OpenSquilla 限时活动 (免费 68 元 token)" />
+        <page link="https://autoglm.ai/misc/autoclaw-invite?activity_id=autoclaw_fission&amp;channel=fission&amp;target_app=autoclaw&amp;target_app_version=1.17.8&amp;os=win&amp;IC=AZBA3UMR" title="AutoClaw 积分风暴 (邀好友无上限)" />
     </group>
 
     <group title="致谢">
