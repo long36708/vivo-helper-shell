@@ -1,0 +1,13 @@
+# Force LF line endings for files that are executed or parsed on-device.
+#
+# Android's /system/bin/sh (mksh) cannot handle CRLF: the shebang line becomes
+# "#!/system/bin/sh\r" -> interpreter not found / syntax error, and here-docs
+# (cat > file <<'EOF') plus line-based grep parsing silently break.
+# kr-script XML configs are also read line by line by the on-device reader.
+#
+# Without this file, core.autocrlf=true rewrites the working tree to CRLF on
+# every checkout / reset / branch switch, and those CRLF files then get packaged
+# straight into APK assets -> scripts fail on the device.
+# "eol=lf" pins the working tree to LF and overrides core.autocrlf.
+*.sh  text eol=lf
+*.xml text eol=lf
