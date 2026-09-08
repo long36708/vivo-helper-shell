@@ -472,15 +472,15 @@ fi
 [ -n "$HEADERS" ] || die "payload_properties.txt 校验头为空 (无法校验, 包损坏或非标准 OTA?)"
 
 # ---------- 4.5 属性伪装 (SPF) + 恢复出厂 (POWERWASH) ----------
-# 借鉴 vivo_dg_app-v1.0 的 dg_install.sh: 部分 vivo 机型在 ApplyPayload 阶段会校验
-#   ro.vivo.product.version / ro.vivo.security_patch / ro.vivo.anti_ver / ro.vivo.device.name
-# 等系统属性, 降级(或换号)后这些属性与包内期望值不符会被判失败, 严重时触发数据清空。
-# 做法: 在 headers 里追加 4 行伪造属性, update_engine 会据此写入目标槽的 vendor/odm 覆盖,
-# 同时 resetprop 即时写入当前系统, 绕过校验。POWERWASH=1 则令 update_engine 应用完后
-# 自动恢复出厂(清空用户数据)。两项默认关闭, 仅当环境变量显式 =1 时开启。
-# 注意: 这 4 项属性名取自 targets 设备实测的后缀 (各机型可能不同, 以 dg_install.sh 为准)。
-VIVO_PROP_SUFFIX=""
-
+# 与 vivo_dg_app 的 dg_install.sh ①.1 对齐: 伪"当前版本相关读数"为目标包值, 绕过
+#   ro.vivo.product.version + ro.build.version.security_patch + ro.vendor.build.security_patch
+#   的 版本 + 双SPL 门, 并清零 ARB (ro.boot.anti.avb_anti_ver / ro.vivo.ota.arb)。
+# 做法(取值对齐 dg_install.sh, 并保留本脚本 headers 注入能力):
+#   1) 从 metadata 取目标包 post-version / post-security_patch(+回退 post-security-patch-level)
+#      / post-vendor-security_patch 作为伪值 —— 降级方向令"当前版本读数 = 目标包版本"以过门;
+#   2) spoof_append_header 把 5 项写进 HEADERS, update_engine 据此写入目标槽 vendor/odm 覆盖;
+#   3) resetprop 即时写入当前系统, 使 ApplyPayload 阶段的版本/SPL/ARB 校验读到伪值。
+# POWERWASH=1 则令 update_engine 应用完后自动恢复出厂(清空用户数据)。两项默认关闭。
 spoof_append_header() { # key value
   # 仅当该 key 尚未在 headers 中出现时才追加, 避免覆盖包内原生值
   case "$HEADERS" in
@@ -490,39 +490,45 @@ $1=$2" ;;
   esac
 }
 
+# 目标包伪值: 与 dg_install.sh ①.1 一致, 从 metadata 解析
+# (SPL 键回退 post-security-patch-level: 本仓库 vivo_ota.sh 实测 vivo 元数据用此标准键)
+SPF_PV=$(grep -m1 '^post-version=' "$META" 2>/dev/null | cut -d= -f2)
+SPF_SP=$(grep -m1 '^post-security_patch=' "$META" 2>/dev/null | cut -d= -f2)
+[ -z "$SPF_SP" ] && SPF_SP=$(grep -m1 '^post-security-patch-level=' "$META" 2>/dev/null | cut -d= -f2)
+SPF_VSP=$(grep -m1 '^post-vendor-security_patch=' "$META" 2>/dev/null | cut -d= -f2)
+
 if [ "$SPF" = "1" ]; then
-  log "属性伪装(SPF): 伪造 vivo 系统属性以绕过机型/版本/防回滚校验"
-  if [ -z "$VIVO_PROP_SUFFIX" ]; then
-    for suf in \
-      ro.vivo.product.version \
-      ro.vivo.security_patch \
-      ro.vivo.anti_ver \
-      ro.vivo.device.name ; do
-      v=$(getprop "$suf" 2>/dev/null)
-      [ -n "$v" ] && spoof_append_header "$suf" "$v"
-    done
-  else
-    for suf in \
-      "RO_VIVO_PRODUCT_VERSION:ro.vivo.product.version" \
-      "RO_VIVO_SECURITY_PATCH:ro.vivo.security_patch" \
-      "RO_VIVO_ANTI_VER:ro.vivo.anti_ver" \
-      "RO_VIVO_DEVICE_NAME:ro.vivo.device.name" ; do
-      hdr="${suf%%:*}"; prop="${suf##*:}"
-      v=$(getprop "$prop" 2>/dev/null)
-      [ -n "$v" ] && spoof_append_header "$hdr" "$v"
-    done
-  fi
-  # 即时写入当前系统属性 (resetprop 优先, 否则 setprop), 使校验阶段能读到伪值
-  for suf in ro.vivo.product.version ro.vivo.security_patch ro.vivo.anti_ver ro.vivo.device.name ; do
-    v=$(getprop "$suf" 2>/dev/null)
-    [ -n "$v" ] || continue
-    if command -v resetprop >/dev/null 2>&1; then
-      resetprop "$suf" "$v" 2>/dev/null
+  log "属性伪装(SPF): 伪目标包 版本+双SPL+ARB (对齐 dg_install.sh ①.1) 以绕过版本/防回滚校验"
+  # 5 项: 属性=伪值; ARB 两项清零(设备默认即 0, 双保险)
+  for kv in \
+    "ro.vivo.product.version:${SPF_PV}" \
+    "ro.build.version.security_patch:${SPF_SP}" \
+    "ro.vendor.build.security_patch:${SPF_VSP}" \
+    "ro.boot.anti.avb_anti_ver:0" \
+    "ro.vivo.ota.arb:" ; do
+    k="${kv%%:*}"; v="${kv#*:}"
+    spoof_append_header "$k" "$v"
+    if [ -n "$v" ]; then
+      if [ -x "$RESETPROP" ]; then
+        "$RESETPROP" "$k" "$v" 2>/dev/null
+      elif command -v resetprop >/dev/null 2>&1; then
+        resetprop "$k" "$v" 2>/dev/null
+      else
+        setprop "$k" "$v" 2>/dev/null
+      fi
     else
-      setprop "$suf" "$v" 2>/dev/null
+      # 空值属性(ro.vivo.ota.arb)直接清空
+      if [ -x "$RESETPROP" ]; then
+        "$RESETPROP" "$k" "" 2>/dev/null
+      elif command -v resetprop >/dev/null 2>&1; then
+        resetprop "$k" "" 2>/dev/null
+      else
+        setprop "$k" "" 2>/dev/null
+      fi
     fi
+    log "  伪值 set $k=${v:-<空>}"
   done
-  log "  已追加 4 项 SPF 属性到 headers 并 resetprop 写入当前系统"
+  log "  已追加 5 项 SPF 属性到 headers 并写入当前系统(重启复原)"
 fi
 
 if [ "$POWERWASH" = "1" ]; then
@@ -1238,44 +1244,6 @@ if [ "$ROOT_ENABLED" = "1" ]; then
   log "  已写入 $ROOT_PART$TARGET_SLOT, 请确认镜像与机型/内核匹配"
 fi
 
-# ---------- 8.5 刷入 LK (bootloader) 镜像 ----------
-# 参数 (ROOT 三项移除后, 位置整体前移 3 位):
-#   $7  = lk 开关 (1=开启)
-#   $8  = 用户选定的 lk 镜像文件路径
-#   环境变量 LK_IMG / LK_DEV 可单独覆盖(LK_DEV 为精确设备节点, 跳过自动推断)
-# 注意: 多数 vivo 机型 lk 为独立(非 A/B)分区, 无 slot 后缀; 若机型为 lk_a/lk_b 可设 LK_DEV 精确指定。
-# 注: 之前因参数序靠后需用 ${10}/${11}; 现前移到 $7/$8, 可直接引用,
-#   保留带大括号写法 ${7}/${8} (POSIX 下 $7 也合法)。
-LK_ENABLED=0
-[ "${7}" = "1" ] && LK_ENABLED=1
-LK_IMG="${LK_IMG:-${8}}"
-
-if [ "$LK_ENABLED" = "1" ]; then
-  [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
-  [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
-
-  if [ -n "$LK_DEV" ]; then
-    LK_DEV_NODE="$LK_DEV"
-  else
-    # 自动探测 LK 分区: 优先按目标 slot 的 A/B 命名(lk_a/lk_b), 再回退固定名 lk
-    # (实测 vivo PD2419/MTK: LK 是 A/B 分区, by-name 下只有 lk_a/lk_b, 无 lk)
-    LK_DEV_NODE=""
-    for cand in /dev/block/by-name/lk$TARGET_SLOT /dev/block/by-name/lk \
-                /dev/block/bootdevice/by-name/lk$TARGET_SLOT /dev/block/bootdevice/by-name/lk; do
-      if [ -b "$cand" ]; then
-        LK_DEV_NODE="$cand"
-        break
-      fi
-    done
-  fi
-  [ -n "$LK_DEV_NODE" ] && [ -b "$LK_DEV_NODE" ] || die "找不到 LK 分区设备: ${LK_DEV_NODE:-无} (已自动探测 lk_a/lk_b/lk, 仍失败请设 LK_DEV 精确指定)"
-
-  log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"
-  log "  镜像: $LK_IMG"
-  dd if="$LK_IMG" of="$LK_DEV_NODE" bs=4096 || die "写入 $LK_DEV_NODE 失败"
-  log "  已写入 LK 分区, 刷写 bootloader 有风险, 请确认镜像与机型严格匹配"
-fi
-
 # ---------- 9. 完成 ----------
 # 进度已通过 run_client 后台 launch + start_ue_log_tail 增量转发到终端, 无需再提示"正在写入"。
 
@@ -1298,7 +1266,13 @@ print_install_env() {
       log "  保留 ROOT: $ROOT_PART$TARGET_SLOT (方案未知)"
     fi
   fi
-  [ "$LK_ENABLED" = "1" ] && log "  已写入 LK: $LK_DEV_NODE"
+  if [ "$LK_ENABLED" = "1" ]; then
+    case "$LK_VERIFY" in
+      1) log "  已写入 LK: $LK_DEV_NODE (回读校验通过)" ;;
+      0) log "  🚨 已写入 LK: $LK_DEV_NODE (回读校验失败! 已阻止重启, 请重刷 LK)" ;;
+      *) log "  已写入 LK: $LK_DEV_NODE (未做回读校验)" ;;
+    esac
+  fi
   # 属性伪装(SPF): 已在 headers 追加 4 项伪造属性并 resetprop, 绕过机型/版本/防回滚校验
   if [ "$SPF" = "1" ]; then
     log "  属性伪装(SPF): 已启用 (伪造 vivo 系统属性 + resetprop 写入)"
@@ -1355,6 +1329,113 @@ if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
   esac
 else
   log "ℹ 写入未完成(RC=$RC), 跳过切槽。"
+fi
+
+# ---------- 8.6 刷入 LK (bootloader) 镜像 ----------
+# 位置: 本段已从"ROOT 之后/切槽之前"移到"手动切启动槽之后"。原因: 刷 bootloader 必须在
+#   切槽结果已知之后进行 —— 切槽被 HAL 拒绝(SWITCH_RC=1)意味着本次 OTA 不会启动, 此时刷
+#   LK 既无意义又徒增变砖面。只有放到切槽之后才能用 SWITCH_RC 做门控(AGENTS.md: 顺序反了
+#   是变砖前提)。
+# 参数 (ROOT 三项移除后前移 3 位):
+#   $7  = lk 开关 (1=开启)
+#   $8  = 用户选定的 lk 镜像文件路径
+#   环境变量 LK_IMG / LK_DEV 可单独覆盖(LK_DEV 为精确设备节点, 跳过自动推断)
+# 注意: 多数 vivo 机型 lk 为独立(非 A/B)分区, 无 slot 后缀; 若机型为 lk_a/lk_b 可设 LK_DEV 精确指定。
+#
+# 三重闸门 (刷 bootloader 是变砖高危操作):
+#   ① 门控: 先要求本次写入确认为成功(RC=0/1/248), 再要求切槽生效(SWITCH_RC=0)或
+#      非 A/B 无需切槽(SWITCH_RC=2); SWITCH_RC=1(HAL 拒绝)时跳过不刷。
+#   ② 可写: 写前 blockdev --setrw 解除只读/写保护, 否则 dd 直接 Permission denied 失败。
+#   ③ size: 镜像 > 分区 -> die(会被截断, 必坏); 镜像 < 分区 -> 告警后继续(LK 头部自带
+#      长度, 分区尾部残留旧数据通常不影响启动, 与 fastboot flash 行为一致)。
+#   ⚠ ARB 防回滚熔丝无法由脚本豁免: SPF 只能清系统侧 ro.boot.anti.avb_anti_ver, 清不掉
+#      bootloader 自身熔丝。刷入 anti_ver 更低的 LK 会触发熔丝 -> 拒启动(硬砖), 且脚本
+#      全程不报错。务必确认镜像 anti_ver 不低于设备当前值。
+LK_ENABLED=0
+[ "${7}" = "1" ] && LK_ENABLED=1
+LK_IMG="${LK_IMG:-${8}}"
+
+if [ "$LK_ENABLED" = "1" ]; then
+  if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
+    if [ "$SWITCH_RC" = "1" ]; then
+      log "🚨 切槽未生效(HAL 拒绝), 已跳过 LK 刷写: 本次 OTA 不会启动, 刷 LK 无意义且徒增变砖风险"
+      log "   请先重新执行一次安装(等 update-result=0)让切槽生效, 再单独刷 LK"
+      LK_ENABLED=0
+    else
+      [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
+      [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
+
+      if [ -n "$LK_DEV" ]; then
+        LK_DEV_NODE="$LK_DEV"
+      else
+        # 自动探测 LK 分区: 优先按目标 slot 的 A/B 命名(lk_a/lk_b), 再回退固定名 lk
+        # (实测 vivo PD2419/MTK: LK 是 A/B 分区, by-name 下只有 lk_a/lk_b, 无 lk)
+        LK_DEV_NODE=""
+        for cand in /dev/block/by-name/lk$TARGET_SLOT /dev/block/by-name/lk \
+                    /dev/block/bootdevice/by-name/lk$TARGET_SLOT /dev/block/bootdevice/by-name/lk; do
+          if [ -b "$cand" ]; then
+            LK_DEV_NODE="$cand"
+            break
+          fi
+        done
+      fi
+      [ -n "$LK_DEV_NODE" ] && [ -b "$LK_DEV_NODE" ] || die "找不到 LK 分区设备: ${LK_DEV_NODE:-无} (已自动探测 lk_a/lk_b/lk, 仍失败请设 LK_DEV 精确指定)"
+
+      # 闸门②: 解除只读/写保护 (失败不阻断, 由 dd 自身报错兜底)
+      blockdev --setrw "$LK_DEV_NODE" 2>/dev/null
+
+      # 闸门③: 大小校验 (stat 取镜像大小, blockdev 取分区字节数)
+      LK_SZ=$(stat -c %s "$LK_IMG" 2>/dev/null)
+      LK_PSZ=$(blockdev --getsize64 "$LK_DEV_NODE" 2>/dev/null)
+      case "$LK_SZ" in ''|*[!0-9]*) LK_SZ="" ;; esac
+      case "$LK_PSZ" in ''|*[!0-9]*) LK_PSZ="" ;; esac
+      if [ -z "$LK_SZ" ] || [ -z "$LK_PSZ" ]; then
+        log "  ⚠ 无法读取镜像/分区大小(镜像=${LK_SZ:-空} 分区=${LK_PSZ:-空}), 跳过大小校验, 自行承担风险"
+      else
+        if [ "$LK_SZ" -gt "$LK_PSZ" ] 2>/dev/null; then
+          die "LK 镜像(${LK_SZ}B) 大于 LK 分区(${LK_PSZ}B): $LK_DEV_NODE —— 会被截断写入导致 bootloader 损坏, 已中止"
+        fi
+        if [ "$LK_SZ" -lt "$LK_PSZ" ] 2>/dev/null; then
+          log "  ⚠ 镜像(${LK_SZ}B) 小于分区(${LK_PSZ}B): 尾部将残留旧 LK(LK 头部自带长度, 通常不影响启动)"
+        fi
+        log "  大小校验: 镜像=${LK_SZ}B 分区=${LK_PSZ}B"
+      fi
+
+      log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"
+      log "  镜像: $LK_IMG"
+      log "  ⚠ ARB 防回滚熔丝不受本脚本控制: 镜像 anti_ver 低于设备当前值会导致拒启动(硬砖)"
+      dd if="$LK_IMG" of="$LK_DEV_NODE" bs=4096 || die "写入 $LK_DEV_NODE 失败"
+      log "  已写入 LK 分区, 刷写 bootloader 有风险, 请确认镜像与机型严格匹配"
+
+      # ---------- 回读校验 (dd 退出 0 不代表真写进去了) ----------
+      # 比较"镜像 sha256" 与 "分区前 LK_SZ 字节 sha256"。不一致说明写入未落地(被写保护拦下 /
+      # 分区不可写 / 静默丢弃), 此时绝不能自动重启 —— 带损坏 LK 重启即变砖, 故置
+      # SWITCH_BLOCK_REBOOT=1 阻断, 让用户重刷并确认校验通过后再手动重启。
+      LK_VERIFY=0
+      IMG_SUM=$(sha256sum "$LK_IMG" 2>/dev/null | cut -d' ' -f1)
+      if [ -n "$IMG_SUM" ] && [ -n "$LK_SZ" ]; then
+        # 按 4096 整块读(避免 bs=1 的百万次 syscall), 再用 head -c 截到精确的 LK_SZ 字节
+        LK_BLKS=$(( (LK_SZ + 4095) / 4096 ))
+        RD_SUM=$(dd if="$LK_DEV_NODE" bs=4096 count="$LK_BLKS" 2>/dev/null \
+                 | head -c "$LK_SZ" 2>/dev/null | sha256sum 2>/dev/null | cut -d' ' -f1)
+        if [ -n "$RD_SUM" ] && [ "$RD_SUM" = "$IMG_SUM" ]; then
+          LK_VERIFY=1
+          log "  ✅ 回读校验通过: 分区前 ${LK_SZ}B 与镜像 sha256 一致"
+        else
+          log "  🚨 回读校验失败: 镜像 sha256=${IMG_SUM}  分区回读=${RD_SUM:-<空/读取失败>}"
+          log "  🚨 LK 写入未落地(可能被写保护拦截或分区不可写), 已阻止自动重启 —— 请勿手动重启!"
+          log "     请重新刷入一次 LK, 确认回读校验通过后再重启, 否则可能无法开机"
+          SWITCH_BLOCK_REBOOT=1
+        fi
+      else
+        log "  ⚠ 无法计算镜像 sha256 或缺 LK_SZ, 跳过回读校验(需 sha256sum + stat 支持)"
+        LK_VERIFY=-1
+      fi
+    fi
+  else
+    log "ℹ 写入未完成(RC=$RC), 跳过 LK 刷写。"
+    LK_ENABLED=0
+  fi
 fi
 
 if [ "$5" = "1" ]; then
