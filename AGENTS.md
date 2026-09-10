@@ -57,6 +57,8 @@
 - [ ] 所有 `sh $START_DIR/...` 路径是否已加双引号？
 - [ ] 脚本 `<resource>` 是否在 `<nav>` 顶层或对应 `<page>` 内声明？
 - [ ] 所有 `tel:` 暗码是否用 `urllib.parse.unquote` 解码核对过（解码结果必须等于原暗码，逐字符）？
+- [ ] 长耗时脚本的执行前提示是否写在 `desc`（`warning` 在有 `<param>` 的 action 上不生效）？是否区分了『退出』（杀脚本）与『隐藏』（不杀）？
+- [ ] 新增日志行是否避开"成功/完成"等词（否则警告行会被 `paint_line` 染成绿色）？
 
 ### 电话暗码 tel: 编码（反复踩坑，务必照模板）
 
@@ -74,6 +76,32 @@ t = open("app/src/main/assets/kr-script/secret_codes/secret_codes.xml", encoding
 for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
     print(title.split("(")[0].strip(), "=>", urllib.parse.unquote(d))
 ```
+
+### 执行界面：『退出』会杀脚本，『隐藏』不会（DialogLogFragment）
+
+长耗时脚本（OTA 安装等）必须知道用户在日志界面上能做什么：
+
+- `DialogLogFragment` 的 `isCancelable = false`（`ActionListFragment.kt` 里设置），**返回键关不掉**界面。
+- **『退出』按钮 = 真杀脚本**：`btnExit` 先跑 `forceStopRunnable` 再关界面，`ShellExecutor.killProcess` 执行 `kill -s 1 \`pgrep -f kr_<uuid>\``（`core/.../executor/ShellExecutor.kt:21-52`）。脚本一死，它后面的步骤（切槽 / 刷 LK / 打印小结）**全部不会执行** —— 对 OTA 而言就是"包写进去了但没人切槽，重启被回滚清空"。
+- **『隐藏』按钮 = 只关界面**：`btnHide` 只 `closeView()`，进程继续跑，可用『查看安装进度』之类入口回看。
+- `interruptable="false"`（或 `interruptible="false"`）可同时隐藏这两个按钮，但**用户也失去了唯一的中止手段**，长耗时任务慎用。
+- 结论：提示文案必须把『退出』和『隐藏』**分开写**，不能笼统说"请勿退出界面"。
+
+### `warning` 属性在有参数的 action 上不生效，执行前提示要写在 `desc`
+
+- `ActionListFragment.onActionClick` 只在 `item.confirm` 为真、或 **`warning` 非空且 `params` 为空** 时才弹确认框（`ActionListFragment.kt:351-363`）。带 `<param>` 的 action（如『开始强制安装』）写 `warning` **永远不会被弹出来**。
+- 正确做法：`confirm="true"` + `desc="..."`。`desc` 一箭双雕 —— 既是确认弹窗的 message，也是日志界面顶部常驻文本（`DialogLogFragment` 的 `binding.desc`）。
+- 别用 `desc-sh` 做动态提示：它在**页面加载时**就被 `executeResultRootCached` 求值（`PageConfigReader.kt:613-621`），拿不到用户之后才选的参数（如 OTA 包路径）。动态内容只能用脚本内 `log`/`echo`。
+
+### 日志着色：paint_line 关键词有优先级，"成功"压过"警告"
+
+`vivo_ota.sh` 的 `paint_line` 按 error → success → warn → 默认 的顺序判定，**先命中即返回**：
+
+- 含 `error/fail/失败/错误/fatal/denied` → 红
+- 含 `success/done/成功/完成/okay/applied` → **绿**
+- 含 `warn/warning/⚠/警告` → 黄
+
+坑：一条**警告**行里只要出现"成功/完成"（如"⚠ LK 写入成功不代表刷机包刷入成功"），就会被染成绿色。写警告文案时要避开这些词（改用"刷入失败"走红、用 ⚠ 且不含"成功"走黄），或者直接改 `paint_line` 的判定顺序（会影响既有日志配色，谨慎）。
 
 ## OTA 强刷脚本（kr-script/ota/）
 

@@ -296,6 +296,51 @@ switch_active_slot() {
   fi
 }
 
+# 槽位序号 -> 槽名 (0=_a, 1=_b), 仅用于日志展示
+slot_num2name() {
+  case "$1" in
+    0) echo "_a" ;;
+    1) echo "_b" ;;
+    *) echo "未知" ;;
+  esac
+}
+
+# ---------- 0.1 槽位状态校验: 本次刷入是否成功的权威判据 ----------
+# 判据(需求定义): 查询当前槽位状态 —— 若【当前运行槽】与【待生效槽】不一样, 说明待生效
+#   槽已切到刚写入的那一侧, 即刷入成功; 两者相同则说明目标槽未生效(切槽未落地 / 被 HAL
+#   拒绝), 判定刷入失败。
+# 取值: IBootControl txn=1 getActiveBootSlot(待生效) / txn=2 getCurrentSlot(当前运行),
+#       事务码对齐 swab.sh 真机实测映射(见 AGENTS.md OTA 节事务码表)。
+# 全局输出: INSTALL_OK(1=刷入成功, 0=失败); SLOT_CUR / SLOT_ACT(0|1); SLOT_VERIFY_DETAIL
+# 返回: 0=判定成功; 1=判定失败; 2=非 A/B(无 IBootControl, 无法判定, 按成功放行)
+# 注: 与 switch_active_slot 的"回读 active==目标槽"等价但视角不同 —— 这里是"安装成功后
+#     复查槽位状态", 故独立再查一次(不复用切槽时的回读值), 以拿到最新状态。
+verify_slot_state() {
+  local SVC CUR ACT
+  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+  if [ -z "$SVC" ]; then
+    log "槽位状态: 当前环境无 IBootControl (非 A/B 设备), 无法做槽位校验, 按成功放行"
+    INSTALL_OK=1; SLOT_CUR=""; SLOT_ACT=""
+    SLOT_VERIFY_DETAIL="非 A/B 设备, 未做槽位校验"
+    return 2
+  fi
+  ACT=$(service call "$SVC" 1 2>/dev/null | grep -oE '0x[0-9a-fA-F]+|[0-9]{6,}' | tail -n1 | grep -o '[01]$' | tail -n1)
+  CUR=$(service call "$SVC" 2 2>/dev/null | grep -o '[01]$' | tail -n1)
+  SLOT_CUR="$CUR"; SLOT_ACT="$ACT"
+  log "槽位状态: 当前运行槽(getCurrentSlot)=$(slot_num2name "$CUR")  待生效槽(getActiveBootSlot)=$(slot_num2name "$ACT")"
+  if [ -n "$CUR" ] && [ -n "$ACT" ] && [ "$CUR" != "$ACT" ]; then
+    log "✅ 两者不一致: 下一次启动进入对侧, 目标槽已生效 -> 判定刷入成功 (INSTALL_OK=1)"
+    INSTALL_OK=1
+    SLOT_VERIFY_DETAIL="current=$CUR active=$ACT 不一致 -> 刷入成功"
+    return 0
+  fi
+  log "✗ 两者相同 (current=${CUR:-未知} active=${ACT:-未知}): 目标槽未生效, 判定刷入失败 (INSTALL_OK=0)"
+  log "  ⚠ 切勿直接重启: 重启后引擎会回滚清空刚写入的 $TARGET_SLOT; 请重新执行一次安装, 等 update-result=0 后再切槽"
+  INSTALL_OK=0
+  SLOT_VERIFY_DETAIL="current=${CUR:-未知} active=${ACT:-未知} 相同 -> 目标槽未生效"
+  return 1
+}
+
 # ---------- 0. 校验 ----------
 ROM="$1"
 [ -z "$ROM" ] && die "未选择 OTA 包 (param rom 为空)"
@@ -1128,6 +1173,16 @@ restore_system_certs() {
   fi
 }
 
+# ---------- 6.9 安装前提示 (每次强制安装都提示, 与 XML 顶部 desc 内容一致) ----------
+# 为什么必须提示"请勿退出":
+#   kr-script 日志界面上的『退出』按钮会真杀脚本(forceStop -> kill -s 1 `pgrep -f kr_<uuid>`),
+#   脚本一死, 后面的切槽 / 刷 LK / 安装小结全都不会执行; 此时若重启, update_engine 会
+#   Removing all update state 把刚写入的目标槽回滚清空(update-result 变 1) —— 等于白刷。
+#   『隐藏』按钮只收起界面、不杀进程, 安装继续; 故提示必须把两者区别讲清楚。
+log "⚠ 安装进行中, 预计约 4 分钟, 请勿退出安装界面"
+log "  点『退出』= 终止本脚本 -> 切槽 / 刷 LK / 小结都不会执行, 重启时引擎会回滚清空刚写入的槽"
+log "  点『隐藏』= 仅收起界面, 脚本与安装继续 (之后可用『查看安装进度』回看)"
+
 # 安装前预置 ota89 包装器(防御性兜底, 非守护), 再真正执行安装
 ota89_install_wrapper
 attempt_install
@@ -1309,6 +1364,12 @@ print_install_env() {
   # thermal 阈值: 已被本脚本拉高到 120C(默认 46C), 记录实际生效值
   TH=$(getprop vota.virtual_ab.debug.thermal_threshold 2>/dev/null)
   [ -n "$TH" ] && log "  thermal 阈值: ${TH}mC (默认46000, 本脚本拉高防中途过热中止)"
+  # 槽位判定结果 (权威判据: 当前运行槽 vs 待生效槽)
+  # 结构化标记 SLOT_VERIFY 便于 grep / 事后脚本解析; status.sh 的 summary 会整段收录。
+  if [ -n "$SLOT_VERIFY_DETAIL" ]; then
+    log "  槽位判定: $SLOT_VERIFY_DETAIL (INSTALL_OK=${INSTALL_OK:-未判定})"
+    log "SLOT_VERIFY current=${SLOT_CUR:-?} active=${SLOT_ACT:-?} INSTALL_OK=${INSTALL_OK:-?}"
+  fi
   # 耗时统计: 从记录的安装开始时间算到小结打印时刻。
   if [ -n "$INSTALL_START_TS" ]; then
     END_TS=$(date +%s 2>/dev/null)
@@ -1331,6 +1392,7 @@ print_install_env() {
 # 且在 A/B 设备上才切; 失败/非 A/B 时跳过不阻断。文档坑11: 状态到 UPDATED_NEED_REBOOT
 # 后必须立刻切槽, 否则 bootloader 仍从原槽启动 -> 引擎回滚清空刚写入的槽 (update-result 变 1)。
 SWITCH_RC=0
+INSTALL_OK=0
 if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
   switch_active_slot "$TARGET_SLOT"; SWITCH_RC=$?
   case "$SWITCH_RC" in
@@ -1341,24 +1403,34 @@ if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
        # 标记: 阻止下面自动 reboot
        SWITCH_BLOCK_REBOOT=1 ;;
   esac
+  # ---------- 槽位状态校验: 本次刷入是否成功的权威判据 ----------
+  # 当前运行槽 != 待生效槽 -> 待生效槽已切到刚写入的一侧 -> 刷入成功 (INSTALL_OK=1);
+  # 两者相同 -> 目标槽未生效 -> 判定失败 (INSTALL_OK=0), 置 SWITCH_BLOCK_REBOOT 阻止自动重启。
+  # 非 A/B 设备 (verify 返回 2) 按成功放行, 不阻断重启。
+  log "──────────── 槽位状态校验 ────────────"
+  verify_slot_state; SLOT_VERIFY_RC=$?
+  if [ "$INSTALL_OK" != "1" ]; then
+    SWITCH_BLOCK_REBOOT=1
+  fi
 else
-  log "ℹ 写入未完成(RC=$RC), 跳过切槽。"
+  log "ℹ 写入未完成(RC=$RC), 跳过切槽与槽位校验。"
 fi
 
 # ---------- 8.6 刷入 LK (bootloader) 镜像 ----------
 # 位置: 本段已从"ROOT 之后/切槽之前"移到"手动切启动槽之后"。原因: 刷 bootloader 必须在
-#   切槽结果已知之后进行 —— 切槽被 HAL 拒绝(SWITCH_RC=1)意味着本次 OTA 不会启动, 此时刷
-#   LK 既无意义又徒增变砖面。只有放到切槽之后才能用 SWITCH_RC 做门控(AGENTS.md: 顺序反了
-#   是变砖前提)。
+#   切槽结果已知之后进行 —— 至少要让"切槽被 HAL 拒绝"这件事出现在日志里
+#   (AGENTS.md: 顺序反了是变砖前提)。
+#   注(2026-09-11): 原先"切槽被拒就跳过 LK / 写入未成功就跳过 LK"的门控已按需求"全拆",
+#   现在只要勾选就刷; 本段保留在切槽与槽位校验之后, 只为日志顺序正确 + 三处醒目提示。
 # 参数 (ROOT 三项移除后前移 3 位):
 #   $7  = lk 开关 (1=开启)
 #   $8  = 用户选定的 lk 镜像文件路径
 #   环境变量 LK_IMG / LK_DEV 可单独覆盖(LK_DEV 为精确设备节点, 跳过自动推断)
 # 注意: 多数 vivo 机型 lk 为独立(非 A/B)分区, 无 slot 后缀; 若机型为 lk_a/lk_b 可设 LK_DEV 精确指定。
 #
-# 三重闸门 (刷 bootloader 是变砖高危操作):
-#   ① 门控: 先要求本次写入确认为成功(RC=0/1/248), 再要求切槽生效(SWITCH_RC=0)或
-#      非 A/B 无需切槽(SWITCH_RC=2); SWITCH_RC=1(HAL 拒绝)时跳过不刷。
+# 两重闸门 (刷 bootloader 是变砖高危操作; 原"三重"中的①门控已按需求全拆):
+#   ① 门控[已拆]: 不再要求 RC=0/1/248、也不再要求 SWITCH_RC≠1 —— 勾选即刷。
+#      拆掉后必须在刷前/刷后/小结三处提示"LK 写入 ≠ 刷机包已刷入"。
 #   ② 可写: 写前 blockdev --setrw 解除只读/写保护, 否则 dd 直接 Permission denied 失败。
 #   ③ size: 镜像 > 分区 -> die(会被截断, 必坏); 镜像 < 分区 -> 告警后继续(LK 头部自带
 #      长度, 分区尾部残留旧数据通常不影响启动, 与 fastboot flash 行为一致)。
@@ -1370,95 +1442,111 @@ LK_ENABLED=0
 LK_IMG="${LK_IMG:-${8}}"
 
 if [ "$LK_ENABLED" = "1" ]; then
-  if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
-    if [ "$SWITCH_RC" = "1" ]; then
-      log "🚨 切槽未生效(HAL 拒绝), 已跳过 LK 刷写: 本次 OTA 不会启动, 刷 LK 无意义且徒增变砖风险"
-      log "   请先重新执行一次安装(等 update-result=0)让切槽生效, 再单独刷 LK"
-      LK_ENABLED=0
+  # ── LK 门控已按需求"全拆" (2026-09-11) ──
+  # 只要勾选『刷入 LK』就刷, 不再受 RC(写入结果) / SWITCH_RC(切槽结果) /
+  # INSTALL_OK(槽位判定) 约束 —— 用户主动选的镜像照刷。
+  # 仍保留的硬闸门: 镜像存在 + 分区探测 + 解除只读 + 大小校验 + dd + 回读校验(见下)。
+  # 代价(已与需求确认): OTA 写入未被确认时也会刷 LK, 故刷前 / 回读通过后 / 小结
+  # 三处都要重申"LK 写入分区 ≠ 刷机包已刷入", 避免把 LK 回读校验通过当成刷机成功。
+  log "⚠ 即将刷入 LK: LK 写入分区不等于刷机包已刷入, 是否刷入以槽位状态(当前运行槽 vs 待生效槽)判定为准"
+  if [ "$SWITCH_RC" = "1" ]; then
+    log "⚠ 切槽被 HAL 拒绝(目标槽本次不会启动), 按需求仍继续刷 LK: 请勿把 LK 写入当作刷机包已刷入"
+  fi
+  if [ "$INSTALL_OK" = "0" ] && [ -n "$SLOT_VERIFY_DETAIL" ]; then
+    log "⚠ 槽位判定未通过 ($SLOT_VERIFY_DETAIL), 按需求仍继续刷 LK"
+  fi
+  [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
+  [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
+
+  if [ -n "$LK_DEV" ]; then
+    LK_DEV_NODE="$LK_DEV"
+  else
+    # 自动探测 LK 分区: 优先按目标 slot 的 A/B 命名(lk_a/lk_b), 再回退固定名 lk
+    # (实测 vivo PD2419/MTK: LK 是 A/B 分区, by-name 下只有 lk_a/lk_b, 无 lk)
+    LK_DEV_NODE=""
+    for cand in /dev/block/by-name/lk$TARGET_SLOT /dev/block/by-name/lk \
+                /dev/block/bootdevice/by-name/lk$TARGET_SLOT /dev/block/bootdevice/by-name/lk; do
+      if [ -b "$cand" ]; then
+        LK_DEV_NODE="$cand"
+        break
+      fi
+    done
+  fi
+  [ -n "$LK_DEV_NODE" ] && [ -b "$LK_DEV_NODE" ] || die "找不到 LK 分区设备: ${LK_DEV_NODE:-无} (已自动探测 lk_a/lk_b/lk, 仍失败请设 LK_DEV 精确指定)"
+  # 恒定刷目标槽一侧: 即便切槽被拒(SWITCH_RC=1)也刷 lk$TARGET_SLOT。
+  # 不改刷当前运行槽 —— 那会在下一次重启(哪怕只是用户手动重启)立刻生效,
+  # LK 与当前系统不匹配即硬砖; 刷非启动侧最坏只是本次不生效。
+  if [ "$SWITCH_RC" = "1" ]; then
+    log "  注: 目标槽 $TARGET_SLOT 本次未生效, LK 仍写入 $LK_DEV_NODE, 需重新刷包并切槽后才会启动"
+  fi
+
+  # 闸门②: 解除只读/写保护 (失败不阻断, 由 dd 自身报错兜底)
+  blockdev --setrw "$LK_DEV_NODE" 2>/dev/null
+
+  # 闸门③: 大小校验 (stat 取镜像大小, blockdev 取分区字节数)
+  LK_SZ=$(stat -c %s "$LK_IMG" 2>/dev/null)
+  LK_PSZ=$(blockdev --getsize64 "$LK_DEV_NODE" 2>/dev/null)
+  case "$LK_SZ" in ''|*[!0-9]*) LK_SZ="" ;; esac
+  case "$LK_PSZ" in ''|*[!0-9]*) LK_PSZ="" ;; esac
+  if [ -z "$LK_SZ" ] || [ -z "$LK_PSZ" ]; then
+    log "  ⚠ 无法读取镜像/分区大小(镜像=${LK_SZ:-空} 分区=${LK_PSZ:-空}), 跳过大小校验, 自行承担风险"
+  else
+    if [ "$LK_SZ" -gt "$LK_PSZ" ] 2>/dev/null; then
+      die "LK 镜像(${LK_SZ}B) 大于 LK 分区(${LK_PSZ}B): $LK_DEV_NODE —— 会被截断写入导致 bootloader 损坏, 已中止"
+    fi
+    if [ "$LK_SZ" -lt "$LK_PSZ" ] 2>/dev/null; then
+      log "  ⚠ 镜像(${LK_SZ}B) 小于分区(${LK_PSZ}B): 尾部将残留旧 LK(LK 头部自带长度, 通常不影响启动)"
+    fi
+    log "  大小校验: 镜像=${LK_SZ}B 分区=${LK_PSZ}B"
+  fi
+
+  log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"
+  log "  镜像: $LK_IMG"
+  log "  ⚠ ARB 防回滚熔丝不受本脚本控制: 镜像 anti_ver 低于设备当前值会导致拒启动(硬砖)"
+  dd if="$LK_IMG" of="$LK_DEV_NODE" bs=4096 || die "写入 $LK_DEV_NODE 失败"
+  log "  已写入 LK 分区, 刷写 bootloader 有风险, 请确认镜像与机型严格匹配"
+
+  # ---------- 回读校验 (dd 退出 0 不代表真写进去了) ----------
+  # 比较"镜像 sha256" 与 "分区前 LK_SZ 字节 sha256"。不一致说明写入未落地(被写保护拦下 /
+  # 分区不可写 / 静默丢弃), 此时绝不能自动重启 —— 带损坏 LK 重启即变砖, 故置
+  # SWITCH_BLOCK_REBOOT=1 阻断, 让用户重刷并确认校验通过后再手动重启。
+  LK_VERIFY=0
+  IMG_SUM=$(sha256sum "$LK_IMG" 2>/dev/null | cut -d' ' -f1)
+  if [ -n "$IMG_SUM" ] && [ -n "$LK_SZ" ]; then
+    # 按 4096 整块读(避免 bs=1 的百万次 syscall), 再用 head -c 截到精确的 LK_SZ 字节
+    LK_BLKS=$(( (LK_SZ + 4095) / 4096 ))
+    RD_SUM=$(dd if="$LK_DEV_NODE" bs=4096 count="$LK_BLKS" 2>/dev/null \
+             | head -c "$LK_SZ" 2>/dev/null | sha256sum 2>/dev/null | cut -d' ' -f1)
+    if [ -n "$RD_SUM" ] && [ "$RD_SUM" = "$IMG_SUM" ]; then
+      LK_VERIFY=1
+      log "  ✅ 回读校验通过: 分区前 ${LK_SZ}B 与镜像 sha256 一致"
+      log "  ⚠ 注意: LK 写入分区不等于刷机包已刷入 —— 是否刷入请以槽位状态判定为准"
     else
-      [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
-      [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
-
-      if [ -n "$LK_DEV" ]; then
-        LK_DEV_NODE="$LK_DEV"
-      else
-        # 自动探测 LK 分区: 优先按目标 slot 的 A/B 命名(lk_a/lk_b), 再回退固定名 lk
-        # (实测 vivo PD2419/MTK: LK 是 A/B 分区, by-name 下只有 lk_a/lk_b, 无 lk)
-        LK_DEV_NODE=""
-        for cand in /dev/block/by-name/lk$TARGET_SLOT /dev/block/by-name/lk \
-                    /dev/block/bootdevice/by-name/lk$TARGET_SLOT /dev/block/bootdevice/by-name/lk; do
-          if [ -b "$cand" ]; then
-            LK_DEV_NODE="$cand"
-            break
-          fi
-        done
-      fi
-      [ -n "$LK_DEV_NODE" ] && [ -b "$LK_DEV_NODE" ] || die "找不到 LK 分区设备: ${LK_DEV_NODE:-无} (已自动探测 lk_a/lk_b/lk, 仍失败请设 LK_DEV 精确指定)"
-
-      # 闸门②: 解除只读/写保护 (失败不阻断, 由 dd 自身报错兜底)
-      blockdev --setrw "$LK_DEV_NODE" 2>/dev/null
-
-      # 闸门③: 大小校验 (stat 取镜像大小, blockdev 取分区字节数)
-      LK_SZ=$(stat -c %s "$LK_IMG" 2>/dev/null)
-      LK_PSZ=$(blockdev --getsize64 "$LK_DEV_NODE" 2>/dev/null)
-      case "$LK_SZ" in ''|*[!0-9]*) LK_SZ="" ;; esac
-      case "$LK_PSZ" in ''|*[!0-9]*) LK_PSZ="" ;; esac
-      if [ -z "$LK_SZ" ] || [ -z "$LK_PSZ" ]; then
-        log "  ⚠ 无法读取镜像/分区大小(镜像=${LK_SZ:-空} 分区=${LK_PSZ:-空}), 跳过大小校验, 自行承担风险"
-      else
-        if [ "$LK_SZ" -gt "$LK_PSZ" ] 2>/dev/null; then
-          die "LK 镜像(${LK_SZ}B) 大于 LK 分区(${LK_PSZ}B): $LK_DEV_NODE —— 会被截断写入导致 bootloader 损坏, 已中止"
-        fi
-        if [ "$LK_SZ" -lt "$LK_PSZ" ] 2>/dev/null; then
-          log "  ⚠ 镜像(${LK_SZ}B) 小于分区(${LK_PSZ}B): 尾部将残留旧 LK(LK 头部自带长度, 通常不影响启动)"
-        fi
-        log "  大小校验: 镜像=${LK_SZ}B 分区=${LK_PSZ}B"
-      fi
-
-      log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"
-      log "  镜像: $LK_IMG"
-      log "  ⚠ ARB 防回滚熔丝不受本脚本控制: 镜像 anti_ver 低于设备当前值会导致拒启动(硬砖)"
-      dd if="$LK_IMG" of="$LK_DEV_NODE" bs=4096 || die "写入 $LK_DEV_NODE 失败"
-      log "  已写入 LK 分区, 刷写 bootloader 有风险, 请确认镜像与机型严格匹配"
-
-      # ---------- 回读校验 (dd 退出 0 不代表真写进去了) ----------
-      # 比较"镜像 sha256" 与 "分区前 LK_SZ 字节 sha256"。不一致说明写入未落地(被写保护拦下 /
-      # 分区不可写 / 静默丢弃), 此时绝不能自动重启 —— 带损坏 LK 重启即变砖, 故置
-      # SWITCH_BLOCK_REBOOT=1 阻断, 让用户重刷并确认校验通过后再手动重启。
-      LK_VERIFY=0
-      IMG_SUM=$(sha256sum "$LK_IMG" 2>/dev/null | cut -d' ' -f1)
-      if [ -n "$IMG_SUM" ] && [ -n "$LK_SZ" ]; then
-        # 按 4096 整块读(避免 bs=1 的百万次 syscall), 再用 head -c 截到精确的 LK_SZ 字节
-        LK_BLKS=$(( (LK_SZ + 4095) / 4096 ))
-        RD_SUM=$(dd if="$LK_DEV_NODE" bs=4096 count="$LK_BLKS" 2>/dev/null \
-                 | head -c "$LK_SZ" 2>/dev/null | sha256sum 2>/dev/null | cut -d' ' -f1)
-        if [ -n "$RD_SUM" ] && [ "$RD_SUM" = "$IMG_SUM" ]; then
-          LK_VERIFY=1
-          log "  ✅ 回读校验通过: 分区前 ${LK_SZ}B 与镜像 sha256 一致"
-        else
-          log "  🚨 回读校验失败: 镜像 sha256=${IMG_SUM}  分区回读=${RD_SUM:-<空/读取失败>}"
-          log "  🚨 LK 写入未落地(可能被写保护拦截或分区不可写), 已阻止自动重启 —— 请勿手动重启!"
-          log "     请重新刷入一次 LK, 确认回读校验通过后再重启, 否则可能无法开机"
-          SWITCH_BLOCK_REBOOT=1
-        fi
-      else
-        log "  ⚠ 无法计算镜像 sha256 或缺 LK_SZ, 跳过回读校验(需 sha256sum + stat 支持)"
-        LK_VERIFY=-1
-      fi
+      log "  🚨 回读校验失败: 镜像 sha256=${IMG_SUM}  分区回读=${RD_SUM:-<空/读取失败>}"
+      log "  🚨 LK 写入未落地(可能被写保护拦截或分区不可写), 已阻止自动重启 —— 请勿手动重启!"
+      log "     请重新刷入一次 LK, 确认回读校验通过后再重启, 否则可能无法开机"
+      SWITCH_BLOCK_REBOOT=1
     fi
   else
-    log "ℹ 写入未完成(RC=$RC), 跳过 LK 刷写。"
-    LK_ENABLED=0
+    log "  ⚠ 无法计算镜像 sha256 或缺 LK_SZ, 跳过回读校验(需 sha256sum + stat 支持)"
+    LK_VERIFY=-1
   fi
 fi
 
 if [ "$5" = "1" ]; then
+  # 重启前槽位复验 (双保险): 再查一次当前运行槽 vs 待生效槽, 仍不一致才允许重启。
+  # 跳过两种情形: 非 A/B(上次 verify 返回 2, 无槽位概念) 与 未做过校验(RC 非成功)。
+  if [ -n "$SLOT_VERIFY_RC" ] && [ "$SLOT_VERIFY_RC" != "2" ]; then
+    log "──────────── 重启前槽位复验 ────────────"
+    verify_slot_state; SLOT_VERIFY_RC=$?
+    [ "$INSTALL_OK" != "1" ] && SWITCH_BLOCK_REBOOT=1
+  fi
   # 重启模式: 先打印小结再重启(重启后终端/日志会中断, 故小结必须在 reboot 前)
   # (修订 2026-08-27: 此处原误读 $6(实际是 force 开关), 会导致勾"强制重刷"意外自动重启)
   log "──────────── 安装小结 ────────────"
   print_install_env
   if [ "$SWITCH_BLOCK_REBOOT" = "1" ]; then
-    log "🚨 因切槽未生效, 已阻止自动重启。请按上面提示处理后再重启, 避免写入被回滚。"
+    log "🚨 槽位判定未通过(当前运行槽与待生效槽相同)或切槽未生效, 已阻止自动重启。请按上面提示处理后再重启, 避免写入被回滚。"
   else
     log "✅ 包已写入并切到目标槽 $TARGET_SLOT, 即将重启使更新生效..."
     sleep 3
@@ -1469,12 +1557,12 @@ else
   # 用户不勾 reboot 时最容易困惑"刷完没反应", 这里补上收尾提示 + 小结。
   log "──────────── 安装小结 ────────────"
   print_install_env
-  if [ "$SWITCH_RC" = "0" ]; then
-    log "✅ 包已写入并切到目标槽 $TARGET_SLOT, 重启设备即可生效。"
+  if [ "$SWITCH_RC" = "0" ] && [ "$INSTALL_OK" = "1" ]; then
+    log "✅ 包已写入并切到目标槽 $TARGET_SLOT, 槽位判定通过(当前运行槽≠待生效槽), 重启设备即可生效。"
   elif [ "$SWITCH_RC" = "2" ]; then
-    log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效(非 A/B 无需切槽)。"
+    log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效(非 A/B, 未做槽位校验)。"
   else
-    log "⚠ 包已写入 $TARGET_SLOT, 但切槽未生效, 重启前请先解决切槽问题(见上方提示)。"
+    log "⚠ 包已写入 $TARGET_SLOT, 但槽位判定未通过(当前运行槽与待生效槽相同), 重启前请先解决切槽问题(见上方提示)。"
   fi
   log "  若需放弃本次更新改刷其他包, 重启后状态机仍处待生效态, 可 FORCE=1 强制清状态重刷。"
 fi

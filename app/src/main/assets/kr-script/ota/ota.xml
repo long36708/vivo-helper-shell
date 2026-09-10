@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <config>
     <group title="vivo 强制安装 OTA">
-        <action title="▶ 开始强制安装" confirm="true">
+        <action title="▶ 开始强制安装" confirm="true"
+                desc="安装约需 4 分钟, 期间请勿退出本界面: 点『退出』会终止脚本(切槽/刷 LK/小结都不会执行, 重启后写入会被回滚); 点『隐藏』仅收起界面, 安装继续。">
             <param name="rom" type="file" title="选择 OTA 包 (zip)" suffix="zip" />
             <param name="downgrade" type="switch" value="true" label="强制降级 / 跨版本安装" title="强制降级 / 跨版本安装" desc="勾选后设置 ro.ota.allow_downgrade=true(需KernelSU/Magisk resetprop)绕过版本守护(vivo 错误92)" />
             <param name="extras" type="switch" value="true" label="附带 OEM / 基带载荷" title="附带 OEM / 基带载荷" desc="勾选后自动收集 common/modem.zip、mcf_ota.zip、oem_zip/oem|dyn|vgc 等附加载荷(错误89关键)" />
