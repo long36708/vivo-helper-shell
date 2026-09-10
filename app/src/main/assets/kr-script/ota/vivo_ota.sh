@@ -497,9 +497,31 @@ SPF_SP=$(grep -m1 '^post-security_patch=' "$META" 2>/dev/null | cut -d= -f2)
 [ -z "$SPF_SP" ] && SPF_SP=$(grep -m1 '^post-security-patch-level=' "$META" 2>/dev/null | cut -d= -f2)
 SPF_VSP=$(grep -m1 '^post-vendor-security_patch=' "$META" 2>/dev/null | cut -d= -f2)
 
+# 写入一项伪装属性并立即回读校验, 防止"setprop 对 ro.* 无效"造成的静默失败:
+# 无 resetprop 的环境(如 NUT 裸 root)会退化到 setprop, 而 ro.* 只读属性写不进去,
+# 若只写不验, 日志会显示"已写入"但属性没变 -> 引擎侧报错92 却查不到原因。
+# 优先级: $RESETPROP(KSU/Magisk) > $PATH 里的 resetprop > setprop(通常无效)。
+# 返回 0=回读一致(生效); 1=回读不一致(未生效, 调用方负责告警)。
+spoof_set_prop() { # key value
+  local k="$1" v="$2" cur
+  if [ -x "$RESETPROP" ]; then
+    "$RESETPROP" "$k" "$v" 2>/dev/null
+  elif command -v resetprop >/dev/null 2>&1; then
+    resetprop "$k" "$v" 2>/dev/null
+  else
+    setprop "$k" "$v" 2>/dev/null
+  fi
+  cur=$(getprop "$k" 2>/dev/null)
+  [ "$cur" = "$v" ] && return 0
+  # 清空型属性(如 ro.vivo.ota.arb 期望空值): getprop 返回空即视为生效
+  [ -z "$v" ] && [ -z "$cur" ] && return 0
+  return 1
+}
+
 if [ "$SPF" = "1" ]; then
   log "属性伪装(SPF): 伪目标包 版本+双SPL+ARB (对齐 dg_install.sh ①.1) 以绕过版本/防回滚校验"
   # 5 项: 属性=伪值; ARB 两项清零(设备默认即 0, 双保险)
+  SPF_FAIL=""
   for kv in \
     "ro.vivo.product.version:${SPF_PV}" \
     "ro.build.version.security_patch:${SPF_SP}" \
@@ -508,26 +530,18 @@ if [ "$SPF" = "1" ]; then
     "ro.vivo.ota.arb:" ; do
     k="${kv%%:*}"; v="${kv#*:}"
     spoof_append_header "$k" "$v"
-    if [ -n "$v" ]; then
-      if [ -x "$RESETPROP" ]; then
-        "$RESETPROP" "$k" "$v" 2>/dev/null
-      elif command -v resetprop >/dev/null 2>&1; then
-        resetprop "$k" "$v" 2>/dev/null
-      else
-        setprop "$k" "$v" 2>/dev/null
-      fi
+    if spoof_set_prop "$k" "$v"; then
+      log "  ✅ 伪值生效 $k=${v:-<空>}"
     else
-      # 空值属性(ro.vivo.ota.arb)直接清空
-      if [ -x "$RESETPROP" ]; then
-        "$RESETPROP" "$k" "" 2>/dev/null
-      elif command -v resetprop >/dev/null 2>&1; then
-        resetprop "$k" "" 2>/dev/null
-      else
-        setprop "$k" "" 2>/dev/null
-      fi
+      cur=$(getprop "$k" 2>/dev/null)
+      log "  ⚠ 伪装未生效 $k: 期望=${v:-<空>} 实际=${cur:-<空>} (ro 属性需 resetprop 才能改写)"
+      SPF_FAIL="$SPF_FAIL $k"
     fi
-    log "  伪值 set $k=${v:-<空>}"
   done
+  if [ -n "$SPF_FAIL" ]; then
+    log "  🚨 以下属性伪装未生效, 版本/SPL/ARB 门可能仍拦截(错误92):$SPF_FAIL"
+    log "     请确认已装 KernelSU/Magisk 并提供 resetprop; 无 resetprop 时 ro.* 只读无法改写"
+  fi
   log "  已追加 5 项 SPF 属性到 headers 并写入当前系统(重启复原)"
 fi
 
