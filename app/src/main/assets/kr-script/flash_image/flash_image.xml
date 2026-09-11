@@ -6,12 +6,12 @@
         <summary>以整个分区为单位：把分区读成 .img（备份），或把 .img 整块写回分区（刷入）。这是镜像级读写——不解析、不修改文件系统内容，和「把分区挂载成可写」不是一回事。全部操作需要 Root。</summary>
 
         <action title="查看分区列表" interruptible="true">
-            <desc>列出设备上全部块分区：大小、是否当前运行槽、是否危险/逻辑分区（带 ⚠ 标记）。纯只读，不改动任何内容</desc>
+            <desc>列出设备上可操作的块分区：大小、是否当前运行槽、是否危险/逻辑分区（带 ⚠ 标记）。userdata 这类禁止读写的分区不展示。纯只读，不改动任何内容</desc>
             <set>sh "$START_DIR/kr-script/flash_image/image.sh" list</set>
         </action>
 
         <action title="备份分区（可多选）" interruptible="true" confirm="true">
-            <desc>把选中的分区整体读成 .img，存到 下载/VivoHelper/partitions/分区名/分区名_时间戳.img。可多选。写入前会预检：选中总大小超过可用空间 80% 直接中止并列出占比最大的分区；备份目录所在的那个分区会被跳过（否则 dd 会把输出文件自己也读进去，一边读一边把文件撑大，直到存储写满）。⚠ 列表弹窗里有「全选」，点它会把 userdata 这类上百 GB 的分区一起选上。</desc>
+            <desc>把选中的分区整体读成 .img，默认存到 下载/VivoHelper/partitions/分区名/分区名_时间戳.img（可用下方「备份目录」分组改到别处，例如 OTG）。可多选。写入前会预检：选中总大小超过可用空间 80% 直接中止并列出占比最大的分区；备份目录所在的那个分区会被跳过（否则 dd 会把输出文件自己也读进去，一边读一边把文件撑大，直到存储写满）。⚠ 列表弹窗里有「全选」，点它会一次性选中所有分区，慎用。</desc>
             <params>
                 <param name="parts" type="select" multiple="true" required="true"
                        title="要备份的分区" desc="可多选，勾选后在下方显示已选数量。带 ⚠ 的为危险分区或 super 逻辑分区"
@@ -40,7 +40,7 @@
         </action>
 
         <action title="从备份还原" interruptible="false" confirm="true">
-            <desc>从备份目录里挑一个历史镜像，写回它当初备份时所在的分区（分区名由备份路径反解，不会选错分区）。走与「刷入镜像」完全相同的三道检查和重启选项。注意：备份列表在页面加载时生成，刚备份完需要退出本页再进来刷新。</desc>
+            <desc>从备份目录里挑一个历史镜像，写回它当初备份时所在的分区（分区名由备份路径反解，不会选错分区）。走与「刷入镜像」完全相同的三道检查和重启选项。列表来自当前备份目录（见下方「备份目录」分组），且在页面加载时生成，刚备份完需要退出本页再进来刷新。</desc>
             <params>
                 <param name="img" type="select" required="true"
                        title="备份镜像" desc="从 下载/VivoHelper/partitions 里选择，只认这个目录里的文件"
@@ -54,6 +54,29 @@
                 </param>
             </params>
             <set>sh "$START_DIR/kr-script/flash_image/image.sh" restore "$img" "$reboot_mode"</set>
+        </action>
+    </group>
+
+    <group title="备份目录">
+        <summary>默认备份到「下载/VivoHelper/partitions」。可改到任意目录——放到 OTG/USB 这类外置存储上时，备份目录就不在内置 userdata 上了，userdata 这类分区也就能安全备份。备份与还原共用同一份设置。</summary>
+
+        <action title="查看当前备份目录" interruptible="true">
+            <desc>显示当前生效的备份目录、是否为默认目录，以及它的可用空间。可用空间显示「未知」说明本机型读不到该挂载点的容量，容量预检会失效（分区自举检测仍生效）</desc>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" showdir</set>
+        </action>
+
+        <action title="设置备份目录" interruptible="true" confirm="true">
+            <desc>自定义备份目录，设置后「备份分区」和「从备份还原」都用它，目录不存在会自动创建。镜像按「目录/分区名/分区名_时间戳.img」存放。注意：备份目录所在的那个分区会被自动排除在备份之外，把目录改到外置存储就不再受内置存储剩余空间的限制。</desc>
+            <params>
+                <param name="dir" type="folder" required="true"
+                       title="备份目录" desc="选一个文件夹作为备份根目录" />
+            </params>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" setdir "$dir"</set>
+        </action>
+
+        <action title="恢复默认备份目录" interruptible="true" confirm="true">
+            <desc>清除自定义设置，回到「下载/VivoHelper/partitions」。只改设置，不会删除已经备份出来的镜像文件</desc>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" resetdir</set>
         </action>
     </group>
 </config>

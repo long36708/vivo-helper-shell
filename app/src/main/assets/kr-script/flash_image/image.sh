@@ -24,17 +24,34 @@ command -v "$BB" >/dev/null 2>&1 || BB=""
 TEMP_DIR="${TEMP_DIR:-/data/local/tmp}"
 SLOT_SUFFIX=$(getprop ro.boot.slot_suffix 2>/dev/null)
 
-# 备份目录: 公共下载目录优先 (备份的意义就是能取出来), 逐级回退
-BACKUP_ROOT=""
+# 备份目录: 默认公共下载目录 (备份的意义就是能取出来), 逐级回退。
+# 用户可用 `setdir` 改到任意目录 (例如 OTG/USB), 配置记在 $CFG, 备份与还原共用。
+CFG="${START_DIR:-$TEMP_DIR}/flash_image_backup_dir"
+
+DEFAULT_BACKUP_ROOT=""
 for base in "${SDCARD_PATH:-}" /sdcard /storage/emulated/0 /data/media/0; do
     [ -n "$base" ] || continue
     cand="$base/Download/VivoHelper/partitions"
     if mkdir -p "$cand" 2>/dev/null && [ -d "$cand" ]; then
-        BACKUP_ROOT="$cand"
+        DEFAULT_BACKUP_ROOT="$cand"
         break
     fi
 done
-[ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="/sdcard/Download/VivoHelper/partitions"
+[ -n "$DEFAULT_BACKUP_ROOT" ] || DEFAULT_BACKUP_ROOT="/sdcard/Download/VivoHelper/partitions"
+
+BACKUP_ROOT=""
+if [ -s "$CFG" ]; then
+    read saved < "$CFG" 2>/dev/null
+    case "$saved" in
+        /*)
+            if mkdir -p "$saved" 2>/dev/null && [ -d "$saved" ]; then
+                BACKUP_ROOT="$saved"
+            else
+                echo "⚠ 自定义备份目录 $saved 现在不可用，本次回退到默认目录"
+            fi ;;
+    esac
+fi
+[ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$DEFAULT_BACKUP_ROOT"
 
 die() { echo "！$*"; exit 1; }
 
@@ -42,6 +59,9 @@ usage() {
     echo "用法:"
     echo "  sh image.sh list"
     echo "  sh image.sh backups"
+    echo "  sh image.sh showdir"
+    echo "  sh image.sh setdir <备份目录>"
+    echo "  sh image.sh resetdir"
     echo "  sh image.sh backup <多选值>"
     echo "  sh image.sh flash <分区名> <镜像> [none|system|recovery|fastboot]"
     echo "  sh image.sh restore <备份镜像路径> [none|system|recovery|fastboot]"
@@ -49,26 +69,70 @@ usage() {
 
 # ------------------------- 基础工具 -------------------------
 
-file_size() {
+# 本脚本一律用 MB 作为容量单位, 不碰字节。
+# 原因: /system/bin/sh 的整型运算是 32 位的, 字节数一旦超过 2^31 (2GB) 就会溢出——
+# 不只是乘法, 连 `[ "$size" -gt 0 ]` 这种比较都会直接报错返回假。
+# 实测表现: 12GB 的 super 在分区列表里显示不出大小, 而 4MB 的小分区正常。
+#
+# 字节串 -> MB。借 awk 的双精度避开整型宽度; awk 也没有时按字符串截掉末 6 位
+# 近似 (相当于除 10^6 而非 2^20, 误差 <5%, 用于容量预检足够)。
+to_mb() {
+    local s="$1" out
+    case "$s" in ''|*[!0-9]*) echo 0; return 0 ;; esac
+    out=$(awk -v v="$s" 'BEGIN{printf "%d", v/1048576}' 2>/dev/null)
+    case "$out" in ''|*[!0-9]*) out="" ;; esac
+    if [ -z "$out" ]; then
+        out=${s%??????}
+        case "$out" in ''|*[!0-9]*) out=0 ;; esac
+    fi
+    echo "$out"
+}
+
+# 文件大小, MB
+file_mb() {
     local s
     s=$(stat -c '%s' "$1" 2>/dev/null)
     [ -n "$s" ] || { [ -n "$BB" ] && s=$("$BB" stat -c '%s' "$1" 2>/dev/null); }
-    case "$s" in ''|*[!0-9]*) s=0 ;; esac
-    echo "$s"
+    to_mb "$s"
 }
 
-human_size() {
-    local s=$1
-    case "$s" in ''|*[!0-9]*) s=0 ;; esac
-    if [ "$s" -ge 1073741824 ]; then
-        echo "$(( s / 1073741824 )).$(( (s % 1073741824) * 10 / 1073741824 ))GB"
-    elif [ "$s" -ge 1048576 ]; then
-        echo "$(( s / 1048576 ))MB"
-    elif [ "$s" -ge 1024 ]; then
-        echo "$(( s / 1024 ))KB"
-    else
-        echo "${s}B"
+# 目录可用空间, 单位 MB —— 不用字节是为了躲开 32 位 shell 的整型溢出:
+# 字节数只要参与乘法 (blocks*blocksize 或 free*80) 就会翻车, 2GB 就能翻成负数。
+#
+# 取值同样不可靠: df 的列格式在 toybox/busybox 之间不一致, 设备名过长还会
+# 让输出换行导致列错位; /sdcard 这类 FUSE 挂载点有些机型直接报 0。
+# 所以先试 stat -f, 再用 df -Pk / df -k 兜底 (这两个单位确定是 KB)。
+# 都不行就明确返回失败 —— 拿不到就说"未知", 绝不静默当成 0 而放弃容量预检。
+dir_free_mb() {
+    local d="$1" out a b
+    out=$(stat -f -c '%a %s' "$d" 2>/dev/null)
+    [ -n "$out" ] || { [ -n "$BB" ] && out=$("$BB" stat -f -c '%a %s' "$d" 2>/dev/null); }
+    set -- $out
+    if [ "$#" -ge 2 ]; then
+        a=$1; b=$2
+        case "$a$b" in
+            ''|*[!0-9]*) ;;
+            *)
+                if [ "$a" -gt 0 ] && [ "$b" -gt 0 ]; then
+                    # 先除再乘: (块数/1024) * (块大小/1024) = MB
+                    if [ "$b" -ge 1024 ]; then
+                        echo $(( (a / 1024) * (b / 1024) ))
+                    else
+                        echo $(( a / (1048576 / b) ))
+                    fi
+                    return 0
+                fi ;;
+        esac
     fi
+    for opt in -Pk -k; do
+        out=$(df $opt "$d" 2>/dev/null | tail -n 1 | awk '{print $(NF-2)}')
+        case "$out" in ''|*[!0-9]*) out="" ;; esac
+        if [ -n "$out" ] && [ "$out" -gt 0 ]; then
+            echo $(( out / 1024 ))
+            return 0
+        fi
+    done
+    return 1
 }
 
 # 分区名 -> 块设备路径
@@ -83,18 +147,24 @@ resolve_part() {
     return 1
 }
 
-# 块设备字节数
-part_size() {
-    local dev="$1" base s
+# 块设备大小, MB
+part_size_mb() {
+    local dev="$1" base real s
     s=$(blockdev --getsize64 "$dev" 2>/dev/null)
     [ -n "$s" ] || { [ -n "$BB" ] && s=$("$BB" blockdev --getsize64 "$dev" 2>/dev/null); }
-    if [ -z "$s" ]; then
-        base=${dev##*/}
-        [ -r "/sys/class/block/$base/size" ] && read s < "/sys/class/block/$base/size" 2>/dev/null
-        [ -n "$s" ] && s=$(( s * 512 ))
+    case "$s" in ''|*[!0-9]*) s="" ;; esac
+    if [ -n "$s" ]; then
+        to_mb "$s"
+        return 0
     fi
+    # /sys/class/block 下只有真实设备名, by-name 里的符号链接名取不到, 必须先解析
+    base=${dev##*/}
+    real=$(readlink -f "$dev" 2>/dev/null)
+    [ -n "$real" ] && base=${real##*/}
+    s=""
+    [ -r "/sys/class/block/$base/size" ] && read s < "/sys/class/block/$base/size" 2>/dev/null
     case "$s" in ''|*[!0-9]*) return 1 ;; esac
-    echo "$s"
+    echo $(( s / 2048 ))   # sysfs 给的是 512 字节扇区数
     return 0
 }
 
@@ -108,12 +178,23 @@ enum_partitions() {
     fi | sort -u
 }
 
+# 禁止分区: 既不展示给用户, 脚本也拒绝读写。
+# 与「危险分区」的区别: 危险分区只是打 ⚠ 提示但仍可选(排障需要), 禁止分区是彻底不提供入口。
+# userdata 入选理由: ① 整块写入必然丢光用户数据 ② 读也没意义 —— 本机型上它是加密/映射设备,
+# dd 出来的不是可用镜像而是乱码 ③ 它是最大的分区, 天然是「全选」误伤的头号目标。
+is_blocked_part() {
+    case "$1" in
+        userdata) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # 分区风险分类: 危险=整块写入会丢数据或不开机; 逻辑=super 逻辑分区
 # 仅用于「标记」, 不做禁用 —— 排障场景必须能选到它们
 hazard_kind() {
     local n="$1" b
     case "$n" in
-        userdata|metadata|misc|frp|persist|persistblk|nvram|nvcfg|protect1|protect2|seccfg|proinfo)
+        metadata|misc|frp|persist|persistblk|nvram|nvcfg|protect1|protect2|seccfg|proinfo)
             echo "危险"; return ;;
         super)
             echo "逻辑"; return ;;
@@ -205,10 +286,17 @@ is_backup_dir_on_dev() {
 do_list() {
     enum_partitions | while IFS= read -r n; do
         [ -n "$n" ] || continue
+        is_blocked_part "$n" && continue
         dev=$(resolve_part "$n") || continue
-        size=$(part_size "$dev") || size=0
         label="$n"
-        [ "$size" -gt 0 ] && label="$label 「$(human_size "$size")」"
+        # 读不到大小就不显示, 不要显示成"不足 1MB"——那是真的小, 不是没读到
+        if mb=$(part_size_mb "$dev"); then
+            if [ "$mb" -gt 0 ]; then
+                label="$label 「${mb}MB」"
+            else
+                label="$label 「不足 1MB」"
+            fi
+        fi
         if [ -n "$SLOT_SUFFIX" ] && [ "$n" != "${n%$SLOT_SUFFIX}" ]; then
             label="$label ·当前槽"
         fi
@@ -221,12 +309,12 @@ do_list() {
 }
 
 do_backups() {
-    local f n s found=0
+    local f n mb found=0
     if [ -d "$BACKUP_ROOT" ]; then
         for f in $(find "$BACKUP_ROOT" -type f -name '*.img' 2>/dev/null | sort -r); do
             n=${f%/*}; n=${n##*/}
-            s=$(file_size "$f")
-            echo "$f|$n · ${f##*/} 「$(human_size "$s")」"
+            mb=$(file_mb "$f")
+            echo "$f|$n · ${f##*/} 「${mb}MB」"
             found=1
         done
     fi
@@ -234,7 +322,7 @@ do_backups() {
 }
 
 do_backup() {
-    local raw="$1" names="" line n dev size total=0 plan avail limit outdir out
+    local raw="$1" names="" line n dev mb total_mb=0 plan free_mb limit_mb outdir out
     [ -n "$raw" ] || die "未选择任何分区"
 
     # 多选值以换行分隔, 逐行收拢成空格分隔的分区名列表
@@ -253,38 +341,49 @@ EOF
     echo "备份目录：$BACKUP_ROOT"
     echo ""
     for n in "$@"; do
+        if is_blocked_part "$n"; then
+            echo "！跳过 $n：该分区禁止读写"
+            continue
+        fi
         if ! dev=$(resolve_part "$n"); then
             echo "！跳过 $n：找不到对应块设备"
             continue
         fi
-        size=$(part_size "$dev") || size=0
-        echo "$n|$dev|$size" >> "$plan"
-        total=$(( total + size ))
+        mb=$(part_size_mb "$dev") || mb=0
+        echo "$n|$dev|$mb" >> "$plan"
+        total_mb=$(( total_mb + mb ))
     done
     [ -s "$plan" ] || { rm -f "$plan"; die "没有可备份的分区"; }
 
-    echo "选中分区总大小：$(human_size "$total")"
-    avail=$(df -k "$BACKUP_ROOT" 2>/dev/null | tail -n 1 | awk '{print $(NF-2)}')
-    case "$avail" in ''|*[!0-9]*) avail=0 ;; esac
-    if [ "$avail" -gt 0 ]; then
-        limit=$(( avail * 1024 * 80 / 100 ))
-        echo "备份目录可用空间：$(human_size $(( avail * 1024 )))"
-        if [ "$total" -gt "$limit" ]; then
+    if [ "$total_mb" -gt 0 ]; then
+        echo "选中分区总大小：${total_mb}MB"
+    else
+        echo "选中分区总大小：不足 1MB"
+    fi
+    free_mb=$(dir_free_mb "$BACKUP_ROOT")
+    case "$free_mb" in ''|*[!0-9]*) free_mb="" ;; esac
+    if [ -n "$free_mb" ] && [ "$free_mb" -gt 0 ]; then
+        limit_mb=$(( free_mb * 80 / 100 ))
+        echo "备份目录可用空间：${free_mb}MB（预检上限 ${limit_mb}MB）"
+        if [ "$total_mb" -gt "$limit_mb" ]; then
             echo ""
-            echo "！拒绝备份：选中总大小超过可用空间的 80%"
+            echo "！拒绝备份：已选 ${total_mb}MB 超过预检上限 ${limit_mb}MB（可用空间的 80%）"
             echo "  占比最大的分区："
-            sort -t'|' -k3 -n -r "$plan" 2>/dev/null | head -n 3 | while IFS='|' read -r pn pd ps; do
-                echo "    $pn  $(human_size "$ps")"
+            sort -t'|' -k3 -n -r "$plan" 2>/dev/null | head -n 3 | while IFS='|' read -r pn pd pm; do
+                echo "    $pn  ${pm}MB"
             done
             echo "  请取消勾选其中一部分再试。"
-            echo "  （列表里的「全选」会把 userdata 这类上百 GB 的分区一起选上）"
+            echo "  （列表弹窗里的「全选」会一次性选中所有分区，慎用）"
             rm -f "$plan"
             exit 1
         fi
+    else
+        echo "⚠ 读不到备份目录的可用空间，跳过容量预检"
+        echo "  （分区自举检测仍然生效：备份目录所在的那个分区一定会被跳过）"
     fi
 
     echo ""
-    while IFS='|' read -r n dev size; do
+    while IFS='|' read -r n dev mb; do
         [ -n "$n" ] || continue
         if is_backup_dir_on_dev "$dev"; then
             echo "！跳过 $n：备份目录就在这个分区上，备份它会把输出文件自己也读进去，必然写满存储"
@@ -300,9 +399,9 @@ EOF
             continue
         fi
         out="$outdir/${n}_$(date +%Y%m%d%H%M%S).img"
-        echo "- 备份 $n（$(human_size "$size")）-> $out"
+        echo "- 备份 $n（${mb}MB）-> $out"
         if dd if="$dev" of="$out" bs=1048576 2>&1; then
-            echo "  读出 $(human_size "$(file_size "$out")")"
+            echo "  读出 $(file_mb "$out")MB"
         else
             echo "  ！失败，已删除不完整的文件"
             rm -f "$out"
@@ -315,17 +414,18 @@ EOF
 }
 
 do_flash() {
-    local n="$1" img="$2" mode="${3:-none}" dev size isize base exp nbytes got kind
+    local n="$1" img="$2" mode="${3:-none}" dev mb imb base exp nbytes got kind
     [ -n "$n" ] || die "未指定分区"
+    is_blocked_part "$n" && die "$n 是禁止读写的分区，已拒绝"
     [ -n "$img" ] || die "未指定镜像文件"
     dev=$(resolve_part "$n") || die "分区 $n 不存在"
     [ -f "$img" ] || die "镜像文件不存在：$img"
 
-    size=$(part_size "$dev") || size=0
-    isize=$(file_size "$img")
+    mb=$(part_size_mb "$dev") || mb=0
+    imb=$(file_mb "$img")
 
-    echo "- 目标分区：$n  ($dev, $(human_size "$size"))"
-    echo "- 镜像文件：$img  ($(human_size "$isize"))"
+    echo "- 目标分区：$n  ($dev, ${mb}MB)"
+    echo "- 镜像文件：$img  (${imb}MB)"
 
     kind=$(hazard_kind "$n")
     case "$kind" in
@@ -340,8 +440,8 @@ do_flash() {
     fi
 
     # 2) 大小
-    if [ "$size" -gt 0 ] && [ "$isize" -gt "$size" ]; then
-        die "拒绝写入：镜像 $(human_size "$isize") 大于分区 $(human_size "$size")"
+    if [ "$mb" -gt 0 ] && [ "$imb" -gt "$mb" ]; then
+        die "拒绝写入：镜像 ${imb}MB 大于分区 ${mb}MB"
     fi
 
     # 3) 已知分区的镜像头魔数
@@ -365,7 +465,7 @@ do_flash() {
         die "写入失败：分区可能已损坏，请立刻用备份镜像还原"
     fi
     sync
-    echo "- 写入完毕（$(human_size "$isize")）"
+    echo "- 写入完毕（${imb}MB）"
 
     do_reboot "$mode"
 }
@@ -405,6 +505,49 @@ do_reboot() {
     esac
 }
 
+# ------------------------ 备份目录配置 ------------------------
+
+do_showdir() {
+    local free_mb
+    echo "当前备份目录：$BACKUP_ROOT"
+    if [ "$BACKUP_ROOT" = "$DEFAULT_BACKUP_ROOT" ]; then
+        echo "（默认目录，未自定义）"
+    fi
+    free_mb=$(dir_free_mb "$BACKUP_ROOT")
+    case "$free_mb" in ''|*[!0-9]*) free_mb="" ;; esac
+    if [ -n "$free_mb" ] && [ "$free_mb" -gt 0 ]; then
+        echo "可用空间：${free_mb}MB"
+    else
+        echo "可用空间：未知"
+    fi
+}
+
+do_setdir() {
+    local d="$1" free_mb cfgdir
+    [ -n "$d" ] || die "未指定目录"
+    if ! mkdir -p "$d" 2>/dev/null || [ ! -d "$d" ]; then
+        die "无法创建或访问目录：$d（路径无效，或没有写入权限）"
+    fi
+    cfgdir=${CFG%/*}
+    mkdir -p "$cfgdir" 2>/dev/null
+    echo "$d" > "$CFG" 2>/dev/null || die "无法写入配置：$CFG"
+    echo "- 备份目录已设置为：$d"
+    free_mb=$(dir_free_mb "$d")
+    case "$free_mb" in ''|*[!0-9]*) free_mb="" ;; esac
+    if [ -n "$free_mb" ] && [ "$free_mb" -gt 0 ]; then
+        echo "  可用空间：${free_mb}MB"
+    else
+        echo "  ⚠ 读不到该目录的可用空间，容量预检会失效"
+    fi
+    echo "  备份目录所在的分区会被自动跳过（否则 dd 会把输出文件自己也读进去）"
+    echo "  把备份目录放到 OTG/USB 上时，就不再受内置存储剩余空间的限制"
+}
+
+do_resetdir() {
+    rm -f "$CFG" 2>/dev/null
+    echo "- 已恢复默认备份目录：$DEFAULT_BACKUP_ROOT"
+}
+
 # --------------------------- 入口 ---------------------------
 
 if [ "$(id -u 2>/dev/null)" != "0" ]; then
@@ -412,9 +555,12 @@ if [ "$(id -u 2>/dev/null)" != "0" ]; then
 fi
 
 case "$1" in
-    list)    do_list ;;
-    backups) do_backups ;;
-    backup)  do_backup "$2" ;;
+    list)     do_list ;;
+    backups)  do_backups ;;
+    showdir)  do_showdir ;;
+    setdir)   do_setdir "$2" ;;
+    resetdir) do_resetdir ;;
+    backup)   do_backup "$2" ;;
     flash)   do_flash "$2" "$3" "$4" ;;
     restore) do_restore "$2" "$3" ;;
     help|-h|"") usage ;;
