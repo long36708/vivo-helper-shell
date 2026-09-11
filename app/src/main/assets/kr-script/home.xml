@@ -60,6 +60,12 @@
         </page>
     </group>
 
+    <group title="分区镜像">
+        <page config="flash_image/flash_image.xml" title="分区镜像读写">
+            <resource file="file:///android_asset/kr-script/flash_image/image.sh" />
+        </page>
+    </group>
+
     <group title="vivo DSU">
         <page config="dsu/dsu.xml" title="vivo DSU 工具箱">
             <resource file="file:///android_asset/kr-script/dsu/dsu.sh" />

@@ -1,5 +1,51 @@
 # CONTEXT.md
 
-> Domain glossary and architecture context for the engineering skills. Created lazily by `/domain-modeling` when terms or decisions get resolved.
+> 本仓库的领域术语表。由 `/domain-modeling` 在术语被敲定时即时维护。
+>
+> 这里只放词汇表，不放实现细节、不放规格、不放脚本方案。
 
-_This file is intentionally a stub. The `/domain-modeling` skill populates it with a glossary and architectural decisions as they are resolved._
+## 分区读写
+
+### 镜像级读写（image-level partition R/W）
+
+以**整个分区**为最小单位：把分区整体读成一个镜像文件，或把镜像文件整体写回分区。
+不解析、不修改文件系统内容，因此天然绕过 dm-verity，但需要 root。
+
+特点：可逆（有备份即可还原）、可离线校验（比对镜像头/大小）、一次覆盖整个分区——
+写错分区即无法开机。
+
+**这是本仓库「分区读写」功能的当前语义。**
+
+### 挂载级读写（mount-level partition R/W）
+
+把分区重新挂载为可写后，直接增删改分区内的文件。改的是文件系统内容，
+在 Android 12+ 需同时处理 dm-verity、super 逻辑分区与 overlay 三层。
+
+**本仓库当前不做**，与镜像级是两条独立路径、风险差一个数量级，需要单独一轮设计。
+
+> 中文「读写分区」同时覆盖上述两个概念，文档中不得裸用，一律写明是「镜像级」还是「挂载级」。
+
+## 分区分类
+
+### 可安全整写的分区（safe-to-image partition）
+
+整块读写后设备仍可开机的分区：`boot`、`init_boot`、`vendor_boot`、`dtbo`、`vbmeta`、`recovery`、`lk` 等。
+
+### 危险分区（hazard partition）
+
+整块写入会导致**用户数据丢失**或**设备无法开机/丢号**的分区，
+如 `userdata`、`metadata`、`misc`、`frp`、`persist`、基带/校准类分区。
+
+在 UI 中被**标记但不禁用**——调试场景（如 LK、DSU 排障）需要能够选中它们。
+
+### 稀疏镜像（sparse image）
+
+带稀疏描述头的镜像格式。隐含语义是「解稀疏后才是真实分区内容」，
+若按原始字节整块写回分区，会导致分区内容全错。识别与拒绝是写入路径的必备前置。
+
+## 槽位
+
+### 当前槽（current slot） / 对位槽（opposite slot）
+
+A/B 设备上，分区名带 `_a` / `_b` 后缀。当前运行系统所在的槽为当前槽，另一个为对位槽。
+切换与判定见 `kr-script/slot/swab.sh`。

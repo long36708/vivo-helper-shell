@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<config>
+    <resource file="file:///android_asset/kr-script/flash_image/image.sh" />
+
+    <group title="分区镜像读写">
+        <summary>以整个分区为单位：把分区读成 .img（备份），或把 .img 整块写回分区（刷入）。这是镜像级读写——不解析、不修改文件系统内容，和「把分区挂载成可写」不是一回事。全部操作需要 Root。</summary>
+
+        <action title="查看分区列表" interruptible="true">
+            <desc>列出设备上全部块分区：大小、是否当前运行槽、是否危险/逻辑分区（带 ⚠ 标记）。纯只读，不改动任何内容</desc>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" list</set>
+        </action>
+
+        <action title="备份分区（可多选）" interruptible="true" confirm="true">
+            <desc>把选中的分区整体读成 .img，存到 下载/VivoHelper/partitions/分区名/分区名_时间戳.img。可多选。写入前会预检：选中总大小超过可用空间 80% 直接中止并列出占比最大的分区；备份目录所在的那个分区会被跳过（否则 dd 会把输出文件自己也读进去，一边读一边把文件撑大，直到存储写满）。⚠ 列表弹窗里有「全选」，点它会把 userdata 这类上百 GB 的分区一起选上。</desc>
+            <params>
+                <param name="parts" type="select" multiple="true" required="true"
+                       title="要备份的分区" desc="可多选，勾选后在下方显示已选数量。带 ⚠ 的为危险分区或 super 逻辑分区"
+                       options-sh="sh &quot;$START_DIR/kr-script/flash_image/image.sh&quot; list" />
+            </params>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" backup "$parts"</set>
+        </action>
+
+        <action title="刷入镜像到分区" interruptible="false" confirm="true">
+            <desc>把一个 .img 整块写进选中的分区。写入前三道检查，任一不通过直接拒绝、不会写入：① 拒绝稀疏镜像 sparse（需先 simg2img 转换）② 镜像不得大于分区 ③ boot / init_boot / recovery / vendor_boot / vbmeta 会校验镜像头魔数。写错分区会无法开机，请核对分区名与镜像是否对得上。默认不重启，方便你刷完先在日志里核对。</desc>
+            <params>
+                <param name="part" type="select" required="true"
+                       title="目标分区" desc="要写入的分区，带 ⚠ 的危险/逻辑分区同样可选，但写入前会再次警告"
+                       options-sh="sh &quot;$START_DIR/kr-script/flash_image/image.sh&quot; list" />
+                <param name="img" type="file" suffix="img" required="true"
+                       title="镜像文件" desc="要写入的 .img 文件。不支持稀疏镜像，官方包/payload 解出来的可能需要先 simg2img 转换" />
+                <param name="reboot_mode" type="select" value="none" required="true"
+                       title="写入后" desc="刷完要做什么。默认不重启——万一镜像刷错，重启前还有机会用备份还原">
+                    <option val="none">不重启</option>
+                    <option val="system">重启到系统</option>
+                    <option val="recovery">重启到 Recovery</option>
+                    <option val="fastboot">重启到 Fastbootd</option>
+                </param>
+            </params>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" flash "$part" "$img" "$reboot_mode"</set>
+        </action>
+
+        <action title="从备份还原" interruptible="false" confirm="true">
+            <desc>从备份目录里挑一个历史镜像，写回它当初备份时所在的分区（分区名由备份路径反解，不会选错分区）。走与「刷入镜像」完全相同的三道检查和重启选项。注意：备份列表在页面加载时生成，刚备份完需要退出本页再进来刷新。</desc>
+            <params>
+                <param name="img" type="select" required="true"
+                       title="备份镜像" desc="从 下载/VivoHelper/partitions 里选择，只认这个目录里的文件"
+                       options-sh="sh &quot;$START_DIR/kr-script/flash_image/image.sh&quot; backups" />
+                <param name="reboot_mode" type="select" value="none" required="true"
+                       title="写入后" desc="刷完要做什么。默认不重启">
+                    <option val="none">不重启</option>
+                    <option val="system">重启到系统</option>
+                    <option val="recovery">重启到 Recovery</option>
+                    <option val="fastboot">重启到 Fastbootd</option>
+                </param>
+            </params>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" restore "$img" "$reboot_mode"</set>
+        </action>
+    </group>
+</config>

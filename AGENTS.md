@@ -51,7 +51,18 @@
 **参数类型速查**（组件库识别的 `type` 值）：
 - 文本：`text`；下拉：`select`（配 `<option>`）；开关：`switch`；文件：`file`（可配 `suffix`/`mime`）；文件夹：`folder`；包名：`package`。
 
+**动态选项与多选**（`flash_image/flash_image.xml` 实装验证）：
+
+- `<param>` 支持 `options-sh`（也接受 `option-sh` / `options-su`，见 `PageConfigReader.kt:328`）。属性值是一段 shell，**以 Root 在页面加载时执行**，输出按行解析成选项：每行 `值|显示名`，不含 `|` 的整行既当值也当显示名（`ActionListFragment.getParamOptions`，`ActionListFragment.kt:503-535`）。
+  - XML 属性里嵌引号要写实体：`options-sh="sh &quot;$START_DIR/kr-script/xxx.sh&quot; list"`。
+  - 生成结果在**页面加载时**固化。脚本执行后产生的新条目（如刚备份出来的镜像）需要退出页面再进来才会出现，这点要写进 `desc` 告诉用户。
+- 同一时刻只能用一种来源：`options-sh` 非空且脚本有输出时，**静态 `<option>` 会被整体忽略**（`else if` 分支）。
+- 多选：`type="select"` + `multiple="true"` → 渲染 `ParamsMultipleSelect`（`ActionParamsLayoutRender.kt:96-99`）。
+  - 多个值用 `separator` 拼接，默认 **`\n`**（`ActionParamInfo.kt:40`），shell 侧按行拆分。
+  - 多选弹窗**固定带「全选」按钮**（`dialog_item_chooser.xml` + `DialogItemChooser.kt:44-65`，`multiple` 是硬编码 `true`），组件库**不支持禁用单个 option**。所以「全选」会带来危险组合时（例如把上百 GB 的 `userdata` 一起选中），只能在 shell 侧拦截。
+
 **自检清单**（改完 XML 后）：
+- [ ] `options-sh` 生成的选项是否会因「全选」产生危险组合？需要在脚本侧预检并拒绝（大小/路径/黑名单）？
 - [ ] `type="select"` 的 `<param>` 是否都带 `<option>` 子标签（而非 `values` 属性）？
 - [ ] 所有开关是否用 `type="switch"`（无 `bool`）？
 - [ ] 所有 `sh $START_DIR/...` 路径是否已加双引号？
@@ -148,7 +159,7 @@ for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
 
 ### Issue tracker
 
-Issues and specs live as GitHub Issues for this repo (`github.com/long36708/vivo-helper-shell`). See `docs-dev/agents/issue-tracker.md`.
+Issues and specs live as GitHub Issues for this repo (`github.com/long36708/vivo-helper-shell`), tracked via the `gh` CLI. Config lives in `docs-dev/agents/` (not `docs/agents/` — `docs/` is a published VitePress site). See `docs-dev/agents/issue-tracker.md`.
 
 ### Domain docs
 
