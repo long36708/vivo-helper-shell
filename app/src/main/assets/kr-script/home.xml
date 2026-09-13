@@ -75,12 +75,7 @@
     <group title="快捷工具">
         <resource file="file:///android_asset/kr-script/wifi/wifi-pwd.sh" />
         <resource file="file:///android_asset/kr-script/verity/get_veritymode.sh" />
-        <action title="打开版本测试 (*#225#)">
-            <desc>快速查看手机详细版本信息：型号、软件版本号、VGC 版本、编译时间等</desc>
-            <script>
-                am start -a android.intent.action.DIAL -d "tel:*%23225%23"
-            </script>
-        </action>
+        <page title="打开版本测试 (*#225#)" desc="快速查看手机详细版本信息：型号、软件版本号、VGC 版本、编译时间等" link="tel:*%23225%23"/>
 
         <action title="设备状态检查">
             <desc>查看当前是否已获取 Root 权限，以及 A/B 分区当前激活的槽位</desc>
