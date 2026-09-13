@@ -79,6 +79,11 @@ jobs:
               echo "::error::KEYSTORE_BASE64 decoded to an empty/invalid file; regenerate it with: base64 -w0 release-keystore.jks"
               exit 1
             fi
+            echo "Decoded keystore: $(wc -c < "$RUNNER_TEMP/release-keystore.jks") bytes, sha256=$(sha256sum "$RUNNER_TEMP/release-keystore.jks" | awk '{print $1}')"
+            if ! "$JAVA_HOME/bin/keytool" -list -keystore "$RUNNER_TEMP/release-keystore.jks" -storepass "$KEYSTORE_PASS" > /dev/null 2>&1; then
+              echo "::error::KEYSTORE_BASE64 did not decode to a readable keystore (truncated/altered when pasted into the secret). Verify the secret byte-for-byte against the local release-keystore.jks (sha256 9c28c319389e8b0f6447133f17f4fa5373994a4fb4a95744fb5f0ac099ffd5fa)."
+              exit 1
+            fi
             {
               echo "KEYSTORE_PATH=$RUNNER_TEMP/release-keystore.jks"
               echo "KEYSTORE_PASS=$(esc "$KEYSTORE_PASS")"
