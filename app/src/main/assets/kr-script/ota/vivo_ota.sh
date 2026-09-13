@@ -1331,12 +1331,23 @@ print_install_env() {
       log "  保留 ROOT: $ROOT_PART$TARGET_SLOT (方案未知)"
     fi
   fi
+  # LK 是整条流程里最危险的一步, 小结里给全: 刷到哪个节点、刷的哪个镜像、多大、校验结果。
+  # 原先只有一行"已写入 LK: <设备节点>" —— 镜像名和大小都看不到, 事后无法确认刷的是哪个包。
+  # 另附一行结构化标记 LK_INFO, 便于 grep / 事后脚本解析(与 status.sh summary 收录习惯一致)。
   if [ "$LK_ENABLED" = "1" ]; then
     case "$LK_VERIFY" in
-      1) log "  已写入 LK: $LK_DEV_NODE (回读校验通过)" ;;
-      0) log "  🚨 已写入 LK: $LK_DEV_NODE (回读校验失败! 已阻止重启, 请重刷 LK)" ;;
-      *) log "  已写入 LK: $LK_DEV_NODE (未做回读校验)" ;;
+      1) log "  LK: 已写入 $LK_DEV_NODE (回读校验通过)" ;;
+      0) log "  LK: 🚨 已写入 $LK_DEV_NODE 但回读校验失败! 已阻止自动重启, 请重刷 LK" ;;
+      *) log "  LK: 已写入 $LK_DEV_NODE (未做回读校验)" ;;
     esac
+    log "  LK 镜像: ${LK_IMG##*/}"
+    log "  LK 路径: $LK_IMG"
+    if [ -n "$LK_SZ" ]; then
+      log "  LK 大小: 镜像=${LK_SZ}B  分区=${LK_PSZ:-未知}B"
+    fi
+    [ -n "$IMG_SUM" ] && log "  LK sha256(镜像): $IMG_SUM"
+    [ -n "$RD_SUM" ]  && log "  LK sha256(回读): $RD_SUM"
+    log "LK_INFO dev=${LK_DEV_NODE:-?} img=${LK_IMG:-?} sz=${LK_SZ:-?} psz=${LK_PSZ:-?} verify=${LK_VERIFY:-?} sha=${IMG_SUM:-?}"
   fi
   # 属性伪装(SPF): 已在 headers 追加 4 项伪造属性并 resetprop, 绕过机型/版本/防回滚校验
   if [ "$SPF" = "1" ]; then
@@ -1496,7 +1507,16 @@ if [ "$LK_ENABLED" = "1" ]; then
   log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"
   log "  镜像: $LK_IMG"
   log "  ⚠ ARB 防回滚熔丝不受本脚本控制: 镜像 anti_ver 低于设备当前值会导致拒启动(硬砖)"
-  dd if="$LK_IMG" of="$LK_DEV_NODE" bs=4096 || die "写入 $LK_DEV_NODE 失败"
+  # dd 的输出(records in/out、bytes copied)是"到底写了多少字节"的唯一直接证据,
+  # 但它是裸 stdout/stderr、不经过 log(), 原先只进终端不进 ota.log —— 这里捕获后经
+  # log() 输出并转成单行, 保证刷 LK 这一步在 ota.log 里也能完整还原。
+  LK_DD_OUT=$(dd if="$LK_IMG" of="$LK_DEV_NODE" bs=4096 2>&1)
+  LK_DD_RC=$?
+  if [ "$LK_DD_RC" -ne 0 ]; then
+    log "  🚨 dd 失败 (rc=$LK_DD_RC): $(printf '%s' "$LK_DD_OUT" | tr '\n' ' ')"
+    die "写入 $LK_DEV_NODE 失败"
+  fi
+  log "  dd 输出: $(printf '%s' "$LK_DD_OUT" | tr '\n' ' ')"
   log "  已写入 LK 分区, 刷写 bootloader 有风险, 请确认镜像与机型严格匹配"
 
   # ---------- 回读校验 (dd 退出 0 不代表真写进去了) ----------
