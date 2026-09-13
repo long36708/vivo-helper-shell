@@ -168,6 +168,30 @@ part_size_mb() {
     return 0
 }
 
+# dd 写块设备报 "Operation not permitted" 基本就是分区被标了只读:
+# 内核 blkdev 对只读块设备直接返回 -EPERM (不是权限/SELinux 问题, 那会是 Permission denied),
+# 特征是 open 成功、第一次写就立刻失败、0 records out。
+# 部分 ROM 开机后会把 boot/lk 这类分区置只读, 需要先 BLKROSET 解锁 —— swab.sh 写 misc 用的同一招。
+unlock_rw() {
+    local dev="$1" ro
+    ro=$(blockdev --getro "$dev" 2>/dev/null)
+    [ -n "$ro" ] || { [ -n "$BB" ] && ro=$("$BB" blockdev --getro "$dev" 2>/dev/null); }
+    [ "$ro" = "1" ] || return 0    # 0=本来可写; 空=没有 blockdev, 交给 dd 去试
+    echo "- 分区当前为只读，尝试解锁为可写…"
+    blockdev --setrw "$dev" 2>/dev/null
+    [ -n "$BB" ] && "$BB" blockdev --setrw "$dev" 2>/dev/null
+    ro=$(blockdev --getro "$dev" 2>/dev/null)
+    [ -n "$ro" ] || { [ -n "$BB" ] && ro=$("$BB" blockdev --getro "$dev" 2>/dev/null); }
+    case "$ro" in
+        1)
+            echo "  ⚠ blockdev --setrw 没能解锁，写入大概率仍会失败"
+            return 1 ;;
+        "") return 0 ;;
+        *) echo "  - 已解锁为可写" ;;
+    esac
+    return 0
+}
+
 enum_partitions() {
     if [ -d /dev/block/by-name ]; then
         ls -1 /dev/block/by-name 2>/dev/null
@@ -196,6 +220,8 @@ hazard_kind() {
     case "$n" in
         metadata|misc|frp|persist|persistblk|nvram|nvcfg|protect1|protect2|seccfg|proinfo)
             echo "危险"; return ;;
+        # lk = 引导器本体。写坏直接不开机, 且不像 boot 那样能用 fastboot 轻易救回
+        lk|lk2) echo "危险"; return ;;
         super)
             echo "逻辑"; return ;;
     esac
@@ -460,9 +486,16 @@ do_flash() {
         fi
     fi
 
+    unlock_rw "$dev"
+
     echo "- 正在写入，请勿中断…"
     if ! dd if="$img" of="$dev" bs=1048576 2>&1; then
-        die "写入失败：分区可能已损坏，请立刻用备份镜像还原"
+        echo ""
+        echo "！写入失败，分区内容可能已被破坏，请立刻用备份镜像还原"
+        echo "  若上面报的是 Operation not permitted，说明分区是只读的："
+        echo "  本脚本已尝试 blockdev --setrw 解锁，仍失败时可重启到 Recovery /"
+        echo "  fastbootd 后再操作（那种环境下块设备不会被置只读）"
+        exit 1
     fi
     sync
     echo "- 写入完毕（${imb}MB）"
