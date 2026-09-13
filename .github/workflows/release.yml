@@ -94,7 +94,7 @@ jobs:
         run: ./gradlew "-Dorg.gradle.java.installations.paths=$JAVA_HOME" :app:assembleRelease --no-configuration-cache --stacktrace
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vivo-helper-shell-release-apk
           path: app/build/outputs/apk/release/*.apk
