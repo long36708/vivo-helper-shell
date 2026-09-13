@@ -6,6 +6,6 @@
   },
   "private": true,
   "devDependencies": {
-    "vitepress": "^2.0.0-alpha.18"
+    "vitepress": "^2.0.0-alpha.20"
   }
 }
