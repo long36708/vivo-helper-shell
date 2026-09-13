@@ -72,7 +72,13 @@ jobs:
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
           if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release-keystore.jks"
+            # GitHub Secrets may carry CRLF/line breaks/whitespace when copied from Windows.
+            # Strip all whitespace before decoding, otherwise GNU base64 -d errors with "invalid input".
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/release-keystore.jks"
+            if [ ! -s "$RUNNER_TEMP/release-keystore.jks" ]; then
+              echo "::error::KEYSTORE_BASE64 decoded to an empty/invalid file; regenerate it with: base64 -w0 release-keystore.jks"
+              exit 1
+            fi
             {
               echo "KEYSTORE_PATH=$RUNNER_TEMP/release-keystore.jks"
               echo "KEYSTORE_PASS=$(esc "$KEYSTORE_PASS")"
