@@ -118,7 +118,7 @@ for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
 
 ### Boot Control HAL 事务码（PD2419 真机实测，2026-09-06）
 
-`service call android.hardware.boot.IBootControl/default <txn>`（服务名用 `service list | grep -i IBootControl` 探测，勿写死）：
+`service call android.hardware.boot.IBootControl/default <txn>`：
 
 | txn | 方法 | 说明 |
 |-----|------|------|
@@ -131,13 +131,40 @@ for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
 
 **不要用 txn 3**（getNumberSlots，只读）做切槽 —— vivo_ota.sh/vivo_ota_ctrl.sh 曾因此切槽从未真正下发。
 
+### ⚠ 探测服务名必须取「名字」列，不能取序号列（2026-09-13 定位，波及 5 处调用）
+
+`service list` 的行格式是 `<序号>\t<服务名>: [<接口名>]`：
+
+```
+29	android.hardware.boot.IBootControl/default: [android.hardware.boot.IBootControl]
+```
+
+曾用 `awk '{print $1}' | tr -d ':'` 提取，拿到的是**序号** `29`，于是 `service call 29 9 i32 1` 报服务不存在、静默无效。后果链：
+
+1. `setActiveBootSlot` 从未真正下发，却因回读为空被解读成「HAL 拒绝：目标槽可能无有效镜像」——**把排查引向完全错误的方向**
+2. `getActiveBootSlot` 回读恒为空 → 槽位复查恒失败 → 误判「刷入失败」
+3. `markBootSuccessful`（txn 8）从未下发 → 引擎卡 CleanupPreviousUpdateAction 时本脚本的解锁动作无效
+4. `getSnapshotMergeStatus`（txn 4）调用失败后被兜底成 `ms=0` → **恒判定「干净」，launch 前的 IDLE 闸形同虚设**
+
+正确取法（`vivo_ota.sh` 的 `boot_hal_svc()`；`vivo_ota_ctrl.sh` / `vivo_ota_cancel.sh` 内联同款）：
+
+```sh
+s=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 \
+    | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
+case "$s" in *[!0-9]*) ;; *) s="" ;; esac   # 纯数字 = 又抓成序号了
+```
+
+服务行**不存在**时必须返回空（让调用方走「非 A/B 设备，跳过」分支），**不要**无条件兜底成标准服务名 —— 那会把「设备不支持」变成「service call 服务不存在」，同样被误读成「HAL 拒绝」。
+
+> 这条失效路径推翻了此前部分结论（「HAL 拒绝切槽」「引擎卡死解不开」可能都只是没调到服务）。txn 表本身来自 swab.sh（写死全名）的真机验证，仍然有效；但修好后上述场景需要重新实测。
+
 ### 返回码 248 的双重语义（曾致假成功）
 
 `update_engine_client` 的**退出码** 248 = binder `Status(-8)` 失败（错误 54 "CleanupPreviousUpdateAction is running"、错误 65 "Already processing" 等），**不是** UPDATED_NEED_REBOOT。引擎真正接受安装时 launch 退出 0；"已应用待重启"只能由 `wait_engine_done` 从引擎日志终态判定（UPDATED_NEED_REBOOT / SendPayloadApplicationComplete [0]）。客户端任何非 0 退出码一律按失败处理（归一为 66，已列入 FAIL_CODES）。
 
 ### CleanupPreviousUpdateAction 卡死（VAB 收尾死锁）
 
-引擎带未完成收尾启动时会卡在 `Boot completed, waiting on markBootSuccessful()`：当前槽未被标记 boot successful（正常由 update_verifier/framework 开机后调用）。此时 `--cancel`（错误 54）、`--reset_status`、强清 prefs、ctl.restart 全都解不开（重启后重进同一状态）。唯一解法：`service call $SVC 8`（markBootSuccessful，幂等）+ `update_engine_client --merge` 让收尾跑完，回 merge=none 的干净 IDLE 后才能提交新安装。推不动时补一次 `ctl.restart update_engine` 让它重排 cleanup（此时槽已 successful，会立即通过）。
+引擎带未完成收尾启动时会卡在 `Boot completed, waiting on markBootSuccessful()`：当前槽未被标记 boot successful（正常由 update_verifier/framework 开机后调用）。此时 `--cancel`（错误 54）、`--reset_status`、强清 prefs、ctl.restart 全都解不开（重启后重进同一状态）。唯一解法：`service call android.hardware.boot.IBootControl/default 8`（markBootSuccessful，幂等）+ `update_engine_client --merge` 让收尾跑完，回 merge=none 的干净 IDLE 后才能提交新安装。推不动时补一次 `ctl.restart update_engine` 让它重排 cleanup（此时槽已 successful，会立即通过）。
 
 **因此**：安装脚本在 `sys.boot_completed!=1` 时不得停 com.bbk.updater / 杀引擎（它参与 markBootSuccessful 链路）；launch 前必须过 IDLE 闸（`ue_wait_idle`）；成功切槽/刷 LK 只能发生在引擎日志确认写入成功之后 —— 顺序反了（包被 741 拒收却去切槽+刷 lk）是变砖前提。
 

@@ -33,7 +33,11 @@ fi
 # (txn=8, 本机实测幂等)让收尾跑完 merge 回到干净 IDLE。
 SKIP_RESTART=0
 if echo "$OUT" | grep -q 'CleanupPreviousUpdateAction'; then
-  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+  # 取"名字"列, 不能取第 1 列(那是序号列如 "29", 会导致 service call 服务不存在,
+  # markBootSuccessful 静默不下发)。与 vivo_ota.sh 的 boot_hal_svc() 保持一致。
+  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 \
+        | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
+  case "$SVC" in *[!0-9]*) ;; *) SVC="" ;; esac
   echo "检测到引擎卡在 CleanupPreviousUpdateAction (等 markBootSuccessful), cancel 动不了, 走收尾解锁 ..."
   if [ -n "$SVC" ]; then
     echo "调 $SVC markBootSuccessful (txn=8, 幂等) 标记当前槽启动成功 ..."

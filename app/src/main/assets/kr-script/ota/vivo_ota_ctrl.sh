@@ -132,7 +132,12 @@ case "$ARG" in
       *)  put "FAILED: 非法 slot 名 '$TS' (仅 _a/_b)"; exit 1 ;;
     esac
     # 探测 AIDL 接口名(不同 vivo 固件名可能不同, 不能写死)
-    SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+    # ⚠ 不能取 service list 的第 1 列 —— 那是**序号列**(如 "29"), service call 会报
+    #    服务不存在, 表现为切槽静默无效还误报"HAL 拒绝"。必须取"名字"列。
+    #    (与 vivo_ota.sh 的 boot_hal_svc() 保持一致)
+    SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 \
+          | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
+    case "$SVC" in *[!0-9]*) ;; *) SVC="" ;; esac
     [ -z "$SVC" ] && { put "${C_YEL}⚠ 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧), 跳过切槽。${C_RST}"; exit 2; }
     put "${C_BLU}切启动槽: $SVC setActiveBootSlot($TNUM) -> $TS${C_RST}"
     # 即便 setActiveBootSlot 返回非0(如 00000002), 以 getActiveBootSlot 回读为准

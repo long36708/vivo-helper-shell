@@ -129,6 +129,33 @@ filter_stream() {
 log() { paint_line "[vivo_ota] $*"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "[vivo_ota] $*" >> "$UE_MIRROR"; }
 die() { printf '%s%s%s\n' "$C_RED" "FAILED: $*" "$C_RST"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "FAILED: $*" >> "$UE_MIRROR"; exit 1; }
 
+# 探测 Boot Control HAL 的服务名。
+#
+# ⚠ 这里曾经是 `awk '{print $1}' | tr -d ':'`, 取到的是 service list 的**序号列**
+#   而不是服务名。service list 行格式:  "<序号>\t<服务名>: [<接口名>]"
+#   后果(2026-09-13 定位): $SVC 变成 "29" 这类序号 -> service call 报服务不存在 ->
+#   ① setActiveBootSlot 静默无效(切槽从未真正下发), 却把回读为空解读成"HAL 拒绝切槽"
+#   ② getActiveBootSlot 回读为空 -> 槽位复查恒失败 -> 误判"刷入失败"
+#   ③ markBootSuccessful(txn 8) 从未下发 -> 引擎卡 CleanupPreviousUpdateAction 时
+#      脚本的解锁动作无效, 连带 ue_merge_status_none 恒返回"干净" -> IDLE 闸形同虚设
+#   所以必须取"名字"列, 并显式拒绝纯数字结果。
+boot_hal_svc() {
+    local line s
+    line=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1)
+    # 压根没有这个服务(非 A/B 设备): 输出空, 让调用方走"跳过切槽"分支。
+    # 注意不能在这里无条件兜底成标准服务名 —— 那会把"设备不支持"变成
+    # "service call 服务不存在", 被上层误读成"HAL 拒绝切槽"。
+    [ -n "$line" ] || return 0
+    s=$(printf '%s\n' "$line" | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
+    case "$s" in
+        *[!0-9]*) ;;          # 含非数字字符才算服务名
+        *) s="" ;;            # 纯数字 -> 又抓成序号了, 丢弃
+    esac
+    # 行在但格式没认出: 退回与 swab.sh 写死的真机实测名一致的兜底值
+    [ -n "$s" ] || s=android.hardware.boot.IBootControl/default
+    printf '%s\n' "$s"
+}
+
 if [ "$UE_LOG_WRITABLE" = "1" ]; then
   echo "[vivo_ota] $(date '+%F %T') 本次日志开始 (同时写入 $UE_MIRROR)" >> "$UE_MIRROR"
   printf '%s%s%s\n' "$C_BLU" "[vivo_ota] $(date '+%F %T') 本次日志开始 (终端带颜色, 文件纯文本: $UE_MIRROR)" "$C_RST"
@@ -271,7 +298,7 @@ switch_active_slot() {
   esac
   # 探测 AIDL 接口名(不同 vivo 固件名可能不同, 不能写死)
   local SVC
-  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+  SVC=$(boot_hal_svc)
   [ -z "$SVC" ] && { log "⚠ 切槽跳过: 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧)"; return 2; }
   log "切启动槽: 调 $SVC setActiveBootSlot($TNUM) -> $TS"
   # 即便 setActiveBootSlot 返回非0(如 00000002), 以 getActiveBootSlot 回读为准
@@ -317,7 +344,7 @@ slot_num2name() {
 #     复查槽位状态", 故独立再查一次(不复用切槽时的回读值), 以拿到最新状态。
 verify_slot_state() {
   local SVC CUR ACT
-  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+  SVC=$(boot_hal_svc)
   if [ -z "$SVC" ]; then
     log "槽位状态: 当前环境无 IBootControl (非 A/B 设备), 无法做槽位校验, 按成功放行"
     INSTALL_OK=1; SLOT_CUR=""; SLOT_ACT=""
@@ -1036,7 +1063,7 @@ stop_ue_log_tail() {
 UE_HAL_SVC=""
 ue_hal_service() {
   if [ -z "$UE_HAL_SVC" ]; then
-    UE_HAL_SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 | awk '{print $1}' | tr -d ':')
+    UE_HAL_SVC=$(boot_hal_svc)
   fi
   [ -n "$UE_HAL_SVC" ]
 }
