@@ -6,7 +6,8 @@
 #   2. local.properties 未入库（.gitignore），CI 中不存在签名配置，
 #      app/build.gradle.kts 会走 `signingConfigs.getByName("debug")` 兜底 —— Debug 构建本就如此。
 #   3. gradle.properties 里的 org.gradle.java.installations.paths 指向本机 Windows 的 mise JDK，
-#      CI 上该路径不存在会被 Gradle 忽略，Java 21 由 setup-java 注入的 JAVA_HOME 自动探测。
+#      runner 上不存在会让 Gradle 抱怨 "Directory ... does not exist"；这里统一用 -D 覆盖为
+#      setup-java 注入的 JAVA_HOME（命令行 -D 优先级高于 gradle.properties）。
 name: Android CI
 
 on:
@@ -57,7 +58,7 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug --no-configuration-cache --stacktrace
+        run: ./gradlew "-Dorg.gradle.java.installations.paths=$JAVA_HOME" :app:assembleDebug --no-configuration-cache --stacktrace
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4

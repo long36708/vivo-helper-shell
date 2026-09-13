@@ -91,7 +91,7 @@ jobs:
           add_var ADS_ENABLED "${{ vars.ADS_ENABLED }}"
 
       - name: Build Release APK
-        run: ./gradlew :app:assembleRelease --no-configuration-cache --stacktrace
+        run: ./gradlew "-Dorg.gradle.java.installations.paths=$JAVA_HOME" :app:assembleRelease --no-configuration-cache --stacktrace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
