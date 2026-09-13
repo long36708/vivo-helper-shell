@@ -16,3 +16,4 @@ generated-images/
 release-keystore.jks
 /.kotlin/sessions
 /buildSrc/.kotlin/sessions/
+.zcode
