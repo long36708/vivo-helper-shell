@@ -117,12 +117,18 @@ case "$ARG" in
     put "${C_BLU}==== 预检结束: 以上仅结构/环境预判, 最终以 update_engine 实际校验为准 ====${C_RST}"
     put "  确认无误后用主安装入口刷入; 仍不确定可先试刷(失败不会变砖, 状态可 FORCE 清)。"
     ;;
-  # 写入完成后手动切启动槽(AIDL boot control HAL), 并回读确认。
+  # 写入完成后手动切启动槽(AIDL boot control HAL)。
   # 背景: vivo/Android15 的 update_engine 跨机型强刷后不会自动 setActiveBootSlot,
   # 写入完成直接 reboot -> bootloader 仍从原槽启动 -> 引擎发现目标槽 pending 即
   # Removing all update state 把刚写入的槽全清(update-result 变 1, 写入白费)。
-  # 故写入成功后必须手动切槽, 且以 getActiveBootSlot 回读为准(不要看 setActiveBootSlot 返回值)。
-  # 入参: $1=set_active_slot, $2=目标 slot(_a/_b); 返回 0=生效, 1=HAL 拒绝(需重装再切), 2=无 AIDL 接口。
+  # 故写入成功后必须手动切槽。
+  #
+  # 2026-09-13 与 vivo_ota.sh 对齐: **不再回读 getActiveBootSlot 判定切槽是否生效**。
+  #   本命令只负责把切槽指令下发, 然后提示用户自行查看槽位状态确认。
+  #   原因: HAL 回读长期被服务名取错列的 bug 污染(见 AGENTS.md OTA 节), 结论不可信;
+  #   且判定权既然交回用户, 重启动作也必须交回 —— 带错槽重启会被引擎回滚清空刚写入的槽。
+  # 入参: $1=set_active_slot, $2=目标 slot(_a/_b)
+  # 返回: 0=已下发切槽指令(结果未经校验); 1=参数/环境异常; 2=无 AIDL 接口(非 A/B)
   set_active_slot)
     TS="${1:-}"
     [ -z "$TS" ] && { put "${C_YEL}用法: sh \$0 set_active_slot <_a|_b>${C_RST}"; exit 1; }
@@ -131,7 +137,7 @@ case "$ARG" in
       _b) TNUM=1 ;;
       *)  put "FAILED: 非法 slot 名 '$TS' (仅 _a/_b)"; exit 1 ;;
     esac
-    # 探测 AIDL 接口名(不同 vivo 固件名可能不同, 不能写死)
+    # 探测 AIDL 接口名。
     # ⚠ 不能取 service list 的第 1 列 —— 那是**序号列**(如 "29"), service call 会报
     #    服务不存在, 表现为切槽静默无效还误报"HAL 拒绝"。必须取"名字"列。
     #    (与 vivo_ota.sh 的 boot_hal_svc() 保持一致)
@@ -140,23 +146,21 @@ case "$ARG" in
     case "$SVC" in *[!0-9]*) ;; *) SVC="" ;; esac
     [ -z "$SVC" ] && { put "${C_YEL}⚠ 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧), 跳过切槽。${C_RST}"; exit 2; }
     put "${C_BLU}切启动槽: $SVC setActiveBootSlot($TNUM) -> $TS${C_RST}"
-    # 即便 setActiveBootSlot 返回非0(如 00000002), 以 getActiveBootSlot 回读为准
-    # 事务码对齐 swab.sh 真机实测: 9=setActiveBootSlot (旧代码误用 3=getNumberSlots 只读)
-    service call "$SVC" 9 i32 "$TNUM" >/dev/null 2>&1
+    # 事务码对齐 swab.sh 真机实测: 9=setActiveBootSlot
+    # (旧代码误用 3=getNumberSlots 只读接口 -> 从未真正下发; 另有服务名取到序号列
+    #  导致 $SVC 变成 "29" -> service not found, 详见 AGENTS.md OTA 节)
+    OUT=$(service call "$SVC" 9 i32 "$TNUM" 2>&1)
+    # 只报告"调用层面"的异常, 不据此判定切槽成败(成败交由用户查看槽位确认)
+    case "$OUT" in
+      *Error*|*error*|*not\ found*|*does\ not\ exist*)
+        put "${C_YEL}  ⚠ setActiveBootSlot 调用返回异常: $OUT${C_RST}" ;;
+    esac
     sleep 1
-    RAW=$(service call "$SVC" 1 2>/dev/null | grep -oE '0x[0-9a-fA-F]+|[0-9]{6,}' | tail -n1)
-    ACTIVE=$(printf '%s' "$RAW" | grep -o '[01]$')
-    put "  getActiveBootSlot 回读: ${RAW:-未知} (归一=${ACTIVE:-?})"
-    if [ "$ACTIVE" = "$TNUM" ]; then
-      CUR=$(service call "$SVC" 2 2>/dev/null | grep -o '[01]$')
-      [ -n "$CUR" ] && put "  当前运行槽(getCurrentSlot)=${CUR} (重启后才变)"
-      put "${C_GRN}✅ 切槽生效: 下一次启动将进入 $TS${C_RST}"
-      exit 0
-    else
-      put "${C_YEL}✗ 切槽未生效: 回读=${ACTIVE:-?} 期望=${TNUM} (HAL 拒绝: 目标槽可能无有效镜像)${C_RST}"
-      put "  → 回到安装步骤重新写入一次, 等 update-result=0 后再切槽; 切勿直接 reboot"
-      exit 1
-    fi
+    put "  切槽指令已下发, 下一次启动应进入 $TS"
+    put "${C_YEL}  ⚠ 本命令不再回读校验切槽结果, 请到『A/B 槽位管理 → 查看当前槽位状态』确认:${C_RST}"
+    put "     『待生效槽』已变成 $TS        -> 可以重启"
+    put "     『待生效槽』仍是当前运行槽    -> 切勿重启! 否则刚写入的 $TS 会被引擎回滚清空"
+    exit 0
     ;;
   *)
     put "用法: sh \$0 {suspend|resume|preflight <zip>|set_active_slot <_a|_b>}"

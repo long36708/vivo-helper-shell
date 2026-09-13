@@ -281,12 +281,18 @@ locate_payload_in_zip() {
   return 1
 }
 
-# 写入完成后手动切启动槽 (AIDL boot control HAL), 并回读确认。
+# 写入完成后手动切启动槽 (AIDL boot control HAL)。
 # 背景: vivo/Android15 的 update_engine 跨机型强刷后不会自动 setActiveBootSlot,
 # 写入完成直接 reboot -> bootloader 仍从原槽启动 -> 引擎发现目标槽 pending 即
 # Removing all update state 把刚写入的槽全清(update-result 变 1, 写入白费)。
-# 故写入成功后必须手动切槽, 且以 getActiveBootSlot 回读为准(不要看 setActiveBootSlot 返回值)。
-# 入参: $1=目标 slot 名(_a/_b); 返回 0=生效, 1=HAL 拒绝(需重装再切), 2=无 AIDL 接口。
+# 故写入成功后必须手动切槽。
+#
+# 2026-09-13 需求变更: **不再回读 getActiveBootSlot 判定切槽是否生效**。
+#   本函数只负责把切槽指令下发, 然后提示用户自行查看槽位状态确认。
+#   原因: HAL 回读长期被服务名取错列的 bug 污染(见 AGENTS.md OTA 节), 结论不可信;
+#   且判定权既然交回用户, 重启动作也必须一并交回 —— 带错槽重启会被引擎回滚清空刚写入的槽。
+# 入参: $1=目标 slot 名(_a/_b)
+# 返回: 0=已下发切槽指令(结果未经校验); 1=参数/环境异常; 2=无 AIDL 接口(非 A/B)
 switch_active_slot() {
   local TS="$1"
   [ -z "$TS" ] && { log "✗ 切槽失败: 未指定目标 slot"; return 1; }
@@ -297,76 +303,39 @@ switch_active_slot() {
     *)  log "✗ 切槽失败: 非法 slot 名 '$TS' (仅 _a/_b)"; return 1 ;;
   esac
   # 探测 AIDL 接口名(不同 vivo 固件名可能不同, 不能写死)
-  local SVC
+  local SVC out
   SVC=$(boot_hal_svc)
   [ -z "$SVC" ] && { log "⚠ 切槽跳过: 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧)"; return 2; }
   log "切启动槽: 调 $SVC setActiveBootSlot($TNUM) -> $TS"
-  # 即便 setActiveBootSlot 返回非0(如 00000002), 以 getActiveBootSlot 回读为准
   # 事务码对齐 swab.sh 真机实测映射: 9=setActiveBootSlot。
-  # (旧代码误用 3=getNumberSlots 只读接口, setActiveBootSlot 从未真正下发,
-  #  回读恒为旧值 -> 必然"切槽未生效"; 详见 AGENTS.md OTA 节事务码表)
-  service call "$SVC" 9 i32 "$TNUM" >/dev/null 2>&1
-  sleep 1
-  local RAW ACTIVE CUR
-  RAW=$(service call "$SVC" 1 2>/dev/null | grep -oE '0x[0-9a-fA-F]+|[0-9]{6,}' | tail -n1)
-  ACTIVE=$(printf '%s' "$RAW" | grep -o '[01]$')
-  log "  getActiveBootSlot 回读: ${RAW:-未知} (归一=${ACTIVE:-?})"
-  if [ "$ACTIVE" = "$TNUM" ]; then
-    CUR=$(service call "$SVC" 2 2>/dev/null | grep -o '[01]$')
-    [ -n "$CUR" ] && log "  当前运行槽(getCurrentSlot)=${CUR} (重启后才变)"
-    log "✅ 切槽生效: 下一次启动将进入 $TS"
-    return 0
-  else
-    log "✗ 切槽未生效: 回读=${ACTIVE:-?} 期望=${TNUM} (HAL 拒绝: 目标槽可能无有效镜像)"
-    log "  → 需回到安装步骤重新写入一次, 等 update-result=0 后再切槽; 切勿直接 reboot"
-    return 1
-  fi
-}
-
-# 槽位序号 -> 槽名 (0=_a, 1=_b), 仅用于日志展示
-slot_num2name() {
-  case "$1" in
-    0) echo "_a" ;;
-    1) echo "_b" ;;
-    *) echo "未知" ;;
+  # (旧代码误用 3=getNumberSlots 只读接口 -> 从未真正下发; 另有服务名取到序号列
+  #  导致 $SVC 变成 "29" -> service not found, 详见 AGENTS.md OTA 节)
+  out=$(service call "$SVC" 9 i32 "$TNUM" 2>&1)
+  # 只报告"调用层面"的异常, 不据此判定切槽成败(成败交由用户查看槽位确认)
+  case "$out" in
+    *Error*|*error*|*not\ found*|*does\ not\ exist*)
+      log "  ⚠ setActiveBootSlot 调用返回异常: $out" ;;
   esac
+  sleep 1
+  log "  切槽指令已下发, 下一次启动应进入 $TS"
+  log "  ⚠ 本脚本不再回读校验切槽结果, 请前往『A/B 槽位管理 → 查看当前槽位状态』确认:"
+  log "     『待生效槽』已变成 $TS        -> 可以重启"
+  log "     『待生效槽』仍是当前运行槽    -> 切勿重启! 否则刚写入的 $TS 会被引擎回滚清空"
+  return 0
 }
 
-# ---------- 0.1 槽位状态校验: 本次刷入是否成功的权威判据 ----------
-# 判据(需求定义): 查询当前槽位状态 —— 若【当前运行槽】与【待生效槽】不一样, 说明待生效
-#   槽已切到刚写入的那一侧, 即刷入成功; 两者相同则说明目标槽未生效(切槽未落地 / 被 HAL
-#   拒绝), 判定刷入失败。
-# 取值: IBootControl txn=1 getActiveBootSlot(待生效) / txn=2 getCurrentSlot(当前运行),
-#       事务码对齐 swab.sh 真机实测映射(见 AGENTS.md OTA 节事务码表)。
-# 全局输出: INSTALL_OK(1=刷入成功, 0=失败); SLOT_CUR / SLOT_ACT(0|1); SLOT_VERIFY_DETAIL
-# 返回: 0=判定成功; 1=判定失败; 2=非 A/B(无 IBootControl, 无法判定, 按成功放行)
-# 注: 与 switch_active_slot 的"回读 active==目标槽"等价但视角不同 —— 这里是"安装成功后
-#     复查槽位状态", 故独立再查一次(不复用切槽时的回读值), 以拿到最新状态。
-verify_slot_state() {
-  local SVC CUR ACT
-  SVC=$(boot_hal_svc)
-  if [ -z "$SVC" ]; then
-    log "槽位状态: 当前环境无 IBootControl (非 A/B 设备), 无法做槽位校验, 按成功放行"
-    INSTALL_OK=1; SLOT_CUR=""; SLOT_ACT=""
-    SLOT_VERIFY_DETAIL="非 A/B 设备, 未做槽位校验"
-    return 2
-  fi
-  ACT=$(service call "$SVC" 1 2>/dev/null | grep -oE '0x[0-9a-fA-F]+|[0-9]{6,}' | tail -n1 | grep -o '[01]$' | tail -n1)
-  CUR=$(service call "$SVC" 2 2>/dev/null | grep -o '[01]$' | tail -n1)
-  SLOT_CUR="$CUR"; SLOT_ACT="$ACT"
-  log "槽位状态: 当前运行槽(getCurrentSlot)=$(slot_num2name "$CUR")  待生效槽(getActiveBootSlot)=$(slot_num2name "$ACT")"
-  if [ -n "$CUR" ] && [ -n "$ACT" ] && [ "$CUR" != "$ACT" ]; then
-    log "✅ 两者不一致: 下一次启动进入对侧, 目标槽已生效 -> 判定刷入成功 (INSTALL_OK=1)"
-    INSTALL_OK=1
-    SLOT_VERIFY_DETAIL="current=$CUR active=$ACT 不一致 -> 刷入成功"
-    return 0
-  fi
-  log "✗ 两者相同 (current=${CUR:-未知} active=${ACT:-未知}): 目标槽未生效, 判定刷入失败 (INSTALL_OK=0)"
-  log "  ⚠ 切勿直接重启: 重启后引擎会回滚清空刚写入的 $TARGET_SLOT; 请重新执行一次安装, 等 update-result=0 后再切槽"
-  INSTALL_OK=0
-  SLOT_VERIFY_DETAIL="current=${CUR:-未知} active=${ACT:-未知} 相同 -> 目标槽未生效"
-  return 1
-}
+# ---------- 0.1 槽位状态校验 [已于 2026-09-13 移除] ----------
+# 原 verify_slot_state() / slot_num2name(): 安装后复查 getActiveBootSlot(txn=1) 与
+# getCurrentSlot(txn=2), 两者不一致即判定"刷入成功"(INSTALL_OK=1), 一致则判定失败并
+# 置 SWITCH_BLOCK_REBOOT 阻止自动重启。
+#
+# 移除原因(需求变更): 该判定完全依赖 HAL 回读, 而回读长期受服务名取错列的 bug 影响
+# (见 AGENTS.md OTA 节), 结论不可信; 与其用一个不可靠的自动判定替用户下结论, 不如
+# 把判定权交回用户 —— 切槽后提示用户到『A/B 槽位管理 → 查看当前槽位状态』自行确认。
+#
+# 连带变更: INSTALL_OK / SLOT_CUR / SLOT_ACT / SLOT_VERIFY_DETAIL / SLOT_VERIFY_RC
+# 这几个全局量一并废弃, 不再有任何自动"刷入成功/失败"的结论。
+# 需要事后核对时, 以用户查看到的槽位状态为准。
 
 # ---------- 0. 校验 ----------
 ROM="$1"
@@ -1391,11 +1360,10 @@ print_install_env() {
   # thermal 阈值: 已被本脚本拉高到 120C(默认 46C), 记录实际生效值
   TH=$(getprop vota.virtual_ab.debug.thermal_threshold 2>/dev/null)
   [ -n "$TH" ] && log "  thermal 阈值: ${TH}mC (默认46000, 本脚本拉高防中途过热中止)"
-  # 槽位判定结果 (权威判据: 当前运行槽 vs 待生效槽)
-  # 结构化标记 SLOT_VERIFY 便于 grep / 事后脚本解析; status.sh 的 summary 会整段收录。
-  if [ -n "$SLOT_VERIFY_DETAIL" ]; then
-    log "  槽位判定: $SLOT_VERIFY_DETAIL (INSTALL_OK=${INSTALL_OK:-未判定})"
-    log "SLOT_VERIFY current=${SLOT_CUR:-?} active=${SLOT_ACT:-?} INSTALL_OK=${INSTALL_OK:-?}"
+  # 槽位: 2026-09-13 起不再做自动判定, 只如实说明"未校验", 结论交给用户查看槽位状态。
+  if [ "$SLOT_PENDING" = "1" ]; then
+    log "  槽位: 切槽指令已下发, 但本脚本不回读校验 (INSTALL_OK 等判据已废弃)"
+    log "        请到『A/B 槽位管理 → 查看当前槽位状态』确认『待生效槽』是否为 $TARGET_SLOT"
   fi
   # 耗时统计: 从记录的安装开始时间算到小结打印时刻。
   if [ -n "$INSTALL_START_TS" ]; then
@@ -1414,41 +1382,40 @@ print_install_env() {
   fi
 }
 
-# ---------- 7. 写入成功后必须手动切启动槽(核心闭环, 否则重启被回滚清空) ----------
-# 仅当写入成功(RC=0/1/248 均为成功语义: 0/1=成功, 248=UPDATED_NEED_REBOOT 待重启)
-# 且在 A/B 设备上才切; 失败/非 A/B 时跳过不阻断。文档坑11: 状态到 UPDATED_NEED_REBOOT
-# 后必须立刻切槽, 否则 bootloader 仍从原槽启动 -> 引擎回滚清空刚写入的槽 (update-result 变 1)。
+# ---------- 7. 写入成功后手动切启动槽(核心闭环, 否则重启被回滚清空) ----------
+# 仅当写入成功(RC=0/1/248 均为成功语义: 0/1=成功, 248=UPDATED_NEED_REBOOT 待重启)才切;
+# 失败时跳过。文档坑11: 状态到 UPDATED_NEED_REBOOT 后必须立刻切槽, 否则 bootloader 仍从
+# 原槽启动 -> 引擎回滚清空刚写入的槽 (update-result 变 1)。
+#
+# 2026-09-13 需求变更(B 方案): 切槽后不再回读校验, 且**不再自动重启** ——
+#   既然无法确认切槽是否落地, 就不能替用户按下去; 带错槽重启会白刷(引擎回滚清空)。
+#   改为提示用户自行查看槽位状态确认后手动重启。
+#   非 A/B 设备(无 IBootControl)没有槽位概念, 不存在这个风险, 勾了重启仍照旧自动重启。
 SWITCH_RC=0
-INSTALL_OK=0
+SWITCH_BLOCK_REBOOT=0
+INSTALL_WRITTEN=0
+SLOT_PENDING=0
 if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
+  INSTALL_WRITTEN=1
   switch_active_slot "$TARGET_SLOT"; SWITCH_RC=$?
   case "$SWITCH_RC" in
-    0) : ;;                              # 切槽生效
-    2) log "⚠ 非 A/B 设备, 无需切槽, 直接重启即可。" ;;  # 无 AIDL 接口
-    1) log "🚨 切槽被 HAL 拒绝! 切勿直接重启, 否则刚写入的 $TARGET_SLOT 会被回滚清空。"
+    0) SLOT_PENDING=1 ;;                 # A/B: 指令已下发但未经校验 -> 不自动重启
+    2) log "ℹ 非 A/B 设备, 无需切槽。" ;;  # 无 AIDL 接口
+    1) log "🚨 切槽调用异常, 切勿直接重启, 否则刚写入的 $TARGET_SLOT 会被回滚清空。"
        log "   请重新执行一次安装(等 update-result=0), 再切槽; 或改用 fastboot 硬切。"
-       # 标记: 阻止下面自动 reboot
+       SLOT_PENDING=1
        SWITCH_BLOCK_REBOOT=1 ;;
   esac
-  # ---------- 槽位状态校验: 本次刷入是否成功的权威判据 ----------
-  # 当前运行槽 != 待生效槽 -> 待生效槽已切到刚写入的一侧 -> 刷入成功 (INSTALL_OK=1);
-  # 两者相同 -> 目标槽未生效 -> 判定失败 (INSTALL_OK=0), 置 SWITCH_BLOCK_REBOOT 阻止自动重启。
-  # 非 A/B 设备 (verify 返回 2) 按成功放行, 不阻断重启。
-  log "──────────── 槽位状态校验 ────────────"
-  verify_slot_state; SLOT_VERIFY_RC=$?
-  if [ "$INSTALL_OK" != "1" ]; then
-    SWITCH_BLOCK_REBOOT=1
-  fi
 else
-  log "ℹ 写入未完成(RC=$RC), 跳过切槽与槽位校验。"
+  log "ℹ 写入未完成(RC=$RC), 跳过切槽。"
 fi
 
 # ---------- 8.6 刷入 LK (bootloader) 镜像 ----------
 # 位置: 本段已从"ROOT 之后/切槽之前"移到"手动切启动槽之后"。原因: 刷 bootloader 必须在
-#   切槽结果已知之后进行 —— 至少要让"切槽被 HAL 拒绝"这件事出现在日志里
+#   切槽动作之后进行 —— 切槽是否生效至少要出现在日志里
 #   (AGENTS.md: 顺序反了是变砖前提)。
 #   注(2026-09-11): 原先"切槽被拒就跳过 LK / 写入未成功就跳过 LK"的门控已按需求"全拆",
-#   现在只要勾选就刷; 本段保留在切槽与槽位校验之后, 只为日志顺序正确 + 三处醒目提示。
+#   现在只要勾选就刷; 本段保留在切槽之后, 只为日志顺序正确 + 三处醒目提示。
 # 参数 (ROOT 三项移除后前移 3 位):
 #   $7  = lk 开关 (1=开启)
 #   $8  = 用户选定的 lk 镜像文件路径
@@ -1456,7 +1423,7 @@ fi
 # 注意: 多数 vivo 机型 lk 为独立(非 A/B)分区, 无 slot 后缀; 若机型为 lk_a/lk_b 可设 LK_DEV 精确指定。
 #
 # 两重闸门 (刷 bootloader 是变砖高危操作; 原"三重"中的①门控已按需求全拆):
-#   ① 门控[已拆]: 不再要求 RC=0/1/248、也不再要求 SWITCH_RC≠1 —— 勾选即刷。
+#   ① 门控[已拆]: 不再要求 RC=0/1/248、也不再要求切槽结果已确认 —— 勾选即刷。
 #      拆掉后必须在刷前/刷后/小结三处提示"LK 写入 ≠ 刷机包已刷入"。
 #   ② 可写: 写前 blockdev --setrw 解除只读/写保护, 否则 dd 直接 Permission denied 失败。
 #   ③ size: 镜像 > 分区 -> die(会被截断, 必坏); 镜像 < 分区 -> 告警后继续(LK 头部自带
@@ -1470,17 +1437,16 @@ LK_IMG="${LK_IMG:-${8}}"
 
 if [ "$LK_ENABLED" = "1" ]; then
   # ── LK 门控已按需求"全拆" (2026-09-11) ──
-  # 只要勾选『刷入 LK』就刷, 不再受 RC(写入结果) / SWITCH_RC(切槽结果) /
-  # INSTALL_OK(槽位判定) 约束 —— 用户主动选的镜像照刷。
+  # 只要勾选『刷入 LK』就刷, 不再受 RC(写入结果) / 切槽结果约束 —— 用户主动选的镜像照刷。
   # 仍保留的硬闸门: 镜像存在 + 分区探测 + 解除只读 + 大小校验 + dd + 回读校验(见下)。
   # 代价(已与需求确认): OTA 写入未被确认时也会刷 LK, 故刷前 / 回读通过后 / 小结
   # 三处都要重申"LK 写入分区 ≠ 刷机包已刷入", 避免把 LK 回读校验通过当成刷机成功。
-  log "⚠ 即将刷入 LK: LK 写入分区不等于刷机包已刷入, 是否刷入以槽位状态(当前运行槽 vs 待生效槽)判定为准"
-  if [ "$SWITCH_RC" = "1" ]; then
-    log "⚠ 切槽被 HAL 拒绝(目标槽本次不会启动), 按需求仍继续刷 LK: 请勿把 LK 写入当作刷机包已刷入"
+  log "⚠ 即将刷入 LK: LK 写入分区不等于刷机包已刷入"
+  if [ "$SLOT_PENDING" = "1" ]; then
+    log "⚠ 本次切槽结果未经校验(需你自行查看槽位状态确认), 按需求仍继续刷 LK: 请勿把 LK 写入当作刷机包已刷入"
   fi
-  if [ "$INSTALL_OK" = "0" ] && [ -n "$SLOT_VERIFY_DETAIL" ]; then
-    log "⚠ 槽位判定未通过 ($SLOT_VERIFY_DETAIL), 按需求仍继续刷 LK"
+  if [ "$INSTALL_WRITTEN" != "1" ]; then
+    log "⚠ 本次 OTA 写入未确认成功(RC=$RC), 按需求仍继续刷 LK"
   fi
   [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
   [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
@@ -1500,11 +1466,11 @@ if [ "$LK_ENABLED" = "1" ]; then
     done
   fi
   [ -n "$LK_DEV_NODE" ] && [ -b "$LK_DEV_NODE" ] || die "找不到 LK 分区设备: ${LK_DEV_NODE:-无} (已自动探测 lk_a/lk_b/lk, 仍失败请设 LK_DEV 精确指定)"
-  # 恒定刷目标槽一侧: 即便切槽被拒(SWITCH_RC=1)也刷 lk$TARGET_SLOT。
+  # 恒定刷目标槽一侧: 即便切槽结果未知(未经校验)也刷 lk$TARGET_SLOT。
   # 不改刷当前运行槽 —— 那会在下一次重启(哪怕只是用户手动重启)立刻生效,
   # LK 与当前系统不匹配即硬砖; 刷非启动侧最坏只是本次不生效。
-  if [ "$SWITCH_RC" = "1" ]; then
-    log "  注: 目标槽 $TARGET_SLOT 本次未生效, LK 仍写入 $LK_DEV_NODE, 需重新刷包并切槽后才会启动"
+  if [ "$SLOT_PENDING" = "1" ]; then
+    log "  注: 目标槽 $TARGET_SLOT 是否生效未经校验, LK 仍写入 $LK_DEV_NODE"
   fi
 
   # 闸门②: 解除只读/写保护 (失败不阻断, 由 dd 自身报错兜底)
@@ -1561,21 +1527,22 @@ if [ "$LK_ENABLED" = "1" ]; then
 fi
 
 if [ "$5" = "1" ]; then
-  # 重启前槽位复验 (双保险): 再查一次当前运行槽 vs 待生效槽, 仍不一致才允许重启。
-  # 跳过两种情形: 非 A/B(上次 verify 返回 2, 无槽位概念) 与 未做过校验(RC 非成功)。
-  if [ -n "$SLOT_VERIFY_RC" ] && [ "$SLOT_VERIFY_RC" != "2" ]; then
-    log "──────────── 重启前槽位复验 ────────────"
-    verify_slot_state; SLOT_VERIFY_RC=$?
-    [ "$INSTALL_OK" != "1" ] && SWITCH_BLOCK_REBOOT=1
-  fi
   # 重启模式: 先打印小结再重启(重启后终端/日志会中断, 故小结必须在 reboot 前)
   # (修订 2026-08-27: 此处原误读 $6(实际是 force 开关), 会导致勾"强制重刷"意外自动重启)
   log "──────────── 安装小结 ────────────"
   print_install_env
   if [ "$SWITCH_BLOCK_REBOOT" = "1" ]; then
-    log "🚨 槽位判定未通过(当前运行槽与待生效槽相同)或切槽未生效, 已阻止自动重启。请按上面提示处理后再重启, 避免写入被回滚。"
+    log "🚨 切槽调用异常或 LK 回读校验未通过, 已阻止自动重启。请按上面提示处理后再重启。"
+  elif [ "$SLOT_PENDING" = "1" ]; then
+    # B 方案: 切槽结果未经校验 -> 不替用户按重启键
+    log "⏸ 已跳过自动重启(勾了『完成后重启』也不自动执行)"
+    log "   原因: 本脚本不再回读校验切槽结果, 无法确认 $TARGET_SLOT 是否已生效;"
+    log "         带错槽重启会被引擎回滚清空刚写入的槽 (本次刷入白费)。"
+    log "   请前往『A/B 槽位管理 → 查看当前槽位状态』:"
+    log "     · 『待生效槽』已是 $TARGET_SLOT -> 回来后手动重启, 或在槽位页直接点『重启到另一卡槽』"
+    log "     · 『待生效槽』仍是当前运行槽 -> 切勿重启! 请重新执行一次安装后再切槽"
   else
-    log "✅ 包已写入并切到目标槽 $TARGET_SLOT, 即将重启使更新生效..."
+    log "✅ 即将重启使更新生效..."
     sleep 3
     reboot
   fi
@@ -1584,12 +1551,14 @@ else
   # 用户不勾 reboot 时最容易困惑"刷完没反应", 这里补上收尾提示 + 小结。
   log "──────────── 安装小结 ────────────"
   print_install_env
-  if [ "$SWITCH_RC" = "0" ] && [ "$INSTALL_OK" = "1" ]; then
-    log "✅ 包已写入并切到目标槽 $TARGET_SLOT, 槽位判定通过(当前运行槽≠待生效槽), 重启设备即可生效。"
-  elif [ "$SWITCH_RC" = "2" ]; then
-    log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效(非 A/B, 未做槽位校验)。"
+  if [ "$INSTALL_WRITTEN" != "1" ]; then
+    log "⚠ 本次写入未确认成功(RC=$RC), 请先按上方提示处理, 不要直接重启。"
+  elif [ "$SLOT_PENDING" = "1" ]; then
+    log "⚠ 包已写入 $TARGET_SLOT, 但切槽结果未经校验。"
+    log "   重启前请先到『A/B 槽位管理 → 查看当前槽位状态』确认『待生效槽』已是 $TARGET_SLOT;"
+    log "   否则重启会被引擎回滚清空(本次刷入白费)。"
   else
-    log "⚠ 包已写入 $TARGET_SLOT, 但槽位判定未通过(当前运行槽与待生效槽相同), 重启前请先解决切槽问题(见上方提示)。"
+    log "✅ 包已写入目标槽 $TARGET_SLOT, 重启设备即可生效(非 A/B, 无槽位概念)。"
   fi
   log "  若需放弃本次更新改刷其他包, 重启后状态机仍处待生效态, 可 FORCE=1 强制清状态重刷。"
 fi

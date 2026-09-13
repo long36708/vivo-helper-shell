@@ -19,7 +19,7 @@
             </param>
             <param name="root_img" type="file" title="已修补的 ROOT 镜像" suffix="img" desc="选择已用 KernelSU/Magisk 修补好的 boot/init_boot 镜像文件, 将写入目标 slot 对应分区" />
             -->
-            <param name="reboot" type="switch" title="刷完自动重启" desc="安装完成后自动重启进入新系统" />
+            <param name="reboot" type="switch" title="刷完自动重启" desc="安装完成后自动重启进入新系统。注意: A/B 设备上脚本不再回读校验切槽结果, 无法确认目标槽已生效时会跳过自动重启, 并提示你先到『A/B 槽位管理 → 查看当前槽位状态』确认后再手动重启(带错槽重启会被引擎回滚清空); 只有非 A/B 设备(无 IBootControl)才一定照此自动重启" />
             <param name="force" type="switch" title="强制重刷" desc="清空 update_engine 持久化状态后重新安装, 忽略'已应用等重启'的包(目标槽已刷过同包时可用, 否则变全量重写)" />
             <param name="lk" type="switch" title="刷入 LK (bootloader)" desc="开启后, 将你指定的 lk 镜像写入 LK 分区(风险操作, 需镜像与机型严格匹配)" />
             <param name="lk_img" type="file" title="LK 镜像" suffix="img" desc="选择要刷入的 lk( bootloader) 镜像文件; 多数 vivo 为独立 lk 分区, 若为 lk_a/lk_b 请用环境变量 LK_DEV 指定" />
@@ -92,7 +92,7 @@
             <param name="rom" type="file" title="OTA 包路径" required="true" desc="待校验的 OTA zip 绝对路径" />
             <set>sh "$START_DIR/kr-script/ota/vivo_ota_ctrl.sh" preflight "$rom"</set>
         </action>
-        <action title="手动切启动槽 (写入后必做)" desc="写入完成后用 AIDL boot control 把下一次启动槽切到目标槽并回读确认。vivo 跨机型强刷后 update_engine 不会自动切槽, 不切直接重启会被回滚清空。可在安装后、重启前手动执行/复核">
+        <action title="手动切启动槽 (写入后必做)" desc="写入完成后用 AIDL boot control 把下一次启动槽切到目标槽。vivo 跨机型强刷后 update_engine 不会自动切槽, 不切直接重启会被回滚清空。注意: 本命令只下发指令、不再回读校验, 执行后请到『A/B 槽位管理 → 查看当前槽位状态』确认『待生效槽』已变成目标槽再重启">
             <param name="slot" type="select" title="目标启动槽" value="_a" desc="切到哪个槽: 一般为与当前 ro.boot.slot_suffix 相反的一侧(_a 或 _b)">
                 <option val="_a">_a</option>
                 <option val="_b">_b</option>
