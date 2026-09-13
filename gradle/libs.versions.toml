@@ -1,9 +1,9 @@
 [versions]
-agp = "9.2.1"
-appcompat = "1.7.1"
-coil = "3.5.0"
-constraintlayout = "2.2.1"
-kotlin = "2.4.10"
+agp = "9.4.0"
+appcompat = "1.8.0"
+coil = "3.6.2"
+constraintlayout = "2.2.2"
+kotlin = "2.4.20"
 material = "1.14.0"
 playServicesAds = "25.4.0"
 
