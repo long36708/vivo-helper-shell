@@ -1,5 +1,7 @@
 # Issue tracker: GitHub
 
+> **Path note.** This repo keeps agent config in `docs-dev/agents/`, not the skill default `docs/agents/`, because `docs/` is a published VitePress site — anything placed there gets built into the public docs. All skills should read from `docs-dev/agents/`.
+
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
 ## Conventions
@@ -32,6 +34,11 @@ Create a GitHub issue.
 ## When a skill says "fetch the relevant ticket"
 
 Run `gh issue view <number> --comments`.
+
+## Environment notes
+
+- **`gh` CLI is not installed** in the current environment (Windows/PowerShell; `gh --version` → `CommandNotFoundException`). Don't assume it's on PATH — check first, and if it's missing ask the user to install it (`winget install --id GitHub.cli`) or fall back to the GitHub web UI / REST API before proceeding.
+- **Triage labels are not configured.** The `triage` skill isn't installed in this environment, so there is no `docs-dev/agents/triage-labels.md` and no `needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix` label vocabulary in use. Re-run `/setup-matt-pocock-skills` after installing `triage` to add it.
 
 ## Wayfinding operations
 
