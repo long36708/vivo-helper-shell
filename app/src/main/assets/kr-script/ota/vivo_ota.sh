@@ -167,38 +167,40 @@ fi
 # 自愈: 残留 pid 若已失效 -> 直接清理放行(不误拦); 若 pid 存活, 进一步判断引擎是否
 #       真在"安装中"——只有"本脚本另一个实例在跑"或"引擎确在进行中安装"才拦截,
 #       避免把"上次异常退出遗留的死锁 pid"误判成重复点击而卡死用户。
-INSTALL_LOCK=/data/local/tmp/vivo_ota_install.pid
-if [ -f "$INSTALL_LOCK" ]; then
-  OLD_PID=$(cat "$INSTALL_LOCK" 2>/dev/null)
-  if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    # pid 存活: 判断是否真在装(自愈关键)
-    ENGINE_BUSY=0
-    if pgrep -x update_engine >/dev/null 2>&1; then
-      L=$(ls -t /logdata/recovery/update_engine_log/update_engine.* 2>/dev/null | head -1)
-      if [ -n "$L" ]; then
-        # 空闲/待重启/收尾卡死等待(markBootSuccessful)都属"非活跃安装" -> 残留 pid 视为
-        # 死锁, 清理放行; 收尾卡死由新实例的 IDLE 闸(ue_wait_idle)负责解锁
-        if grep -qE 'UPDATE_STATUS_IDLE|UPDATED_NEED_REBOOT|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null; then
-          ENGINE_BUSY=0
-        else
-          ENGINE_BUSY=1
-        fi
-      else
-        # 有进程但无日志, 保守视为在进行中
-        ENGINE_BUSY=1
-      fi
-    fi
-    if [ "$ENGINE_BUSY" = "1" ]; then
-      die "已有安装实例在运行 (pid=$OLD_PID) 且引擎正在进行中, 请勿重复点击安装。如确认无残留, 删 $INSTALL_LOCK 后重试。"
-    fi
-    log "检测到残留安装锁 (pid=$OLD_PID 已失效或引擎已空闲), 视为死锁自动清理放行"
+# ---------- 安装单例锁 (原子 mkdir 锁, 防并发实例互相 pkill 打断安装) ----------
+# 2026-09-21 修复: 原实现用 pid 文件 + "引擎是否忙" 判据, 存在 TOCTOU 竞态 ——
+#   实例刚启动时 update_engine 尚未拉起, "引擎不忙" 恒成立, 于是每个新实例都会把
+#   仍然存活的兄弟实例误判成 "死锁/已空闲" 而清锁放行 -> 多实例并发 -> 后启动的实例
+#   在 attempt_install 里 pkill -9 update_engine 打断前一个实例正在进行的写入 ->
+#   引擎写出失败归档 -> 被误判成错误码 10 -> 假失败 (见 ota.log 2026-09-21 复盘)。
+# 现改为 mkdir 原子锁 (mkdir 对同一路径并发只会有一个成功), 且存活判定只用 kill -0,
+# 绝不再用 "引擎是否忙" 作为兄弟实例存活与否的依据。
+INSTALL_LOCK_DIR=/data/local/tmp/vivo_ota_install.lock
+INSTALL_LOCK_PID="$INSTALL_LOCK_DIR/pid"
+_acquire_install_lock() {
+  # 首次尝试原子创建锁目录
+  if mkdir "$INSTALL_LOCK_DIR" 2>/dev/null; then
+    echo "$$" > "$INSTALL_LOCK_PID" 2>/dev/null
+    return 0
   fi
-  # 旧 pid 已失效/已自愈, 清理后继续
-  rm -f "$INSTALL_LOCK" 2>/dev/null
-fi
-echo "$$" > "$INSTALL_LOCK" 2>/dev/null
-# 脚本正常退出/被信号终止时释放锁 (kill -9 无法触发, 但上面的 kill -0 是主要保障)
-trap 'rm -f "$INSTALL_LOCK" 2>/dev/null' EXIT
+  # 锁已存在: 仅凭 kill -0 判持有者是否存活
+  OLD_PID=$(cat "$INSTALL_LOCK_PID" 2>/dev/null)
+  if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    die "已有安装实例在运行 (pid=$OLD_PID), 请勿重复点击安装。如确认该进程为残留, 删除 $INSTALL_LOCK_DIR 后重试。"
+  fi
+  # 持有者已死 (或 pid 文件损坏/为空): 判为残留死锁, 接管重建
+  log "检测到残留安装锁 (pid=${OLD_PID:-未知} 已失效), 视为死锁, 接管重建"
+  rm -rf "$INSTALL_LOCK_DIR" 2>/dev/null
+  if mkdir "$INSTALL_LOCK_DIR" 2>/dev/null; then
+    echo "$$" > "$INSTALL_LOCK_PID" 2>/dev/null
+    return 0
+  fi
+  # 重建时被另一实例抢先拿到锁 -> 让位, 不并发
+  die "获取安装锁失败 (另一实例刚抢占锁), 请勿重复点击安装, 稍后重试。"
+}
+_acquire_install_lock
+# 脚本正常退出/被信号终止时释放锁 (kill -9 无法触发 trap, 由 kill -0 存活判定兜底)
+trap 'rm -rf "$INSTALL_LOCK_DIR" 2>/dev/null' EXIT
 
 # 记录安装开始时间(用于小结耗时统计)。用 date +%s 取 Unix 秒(原生 sh 无 $SECONDS 保证,
 # 且脚本可能被 source 进其他 shell, 自管时间戳更可靠)。
@@ -811,7 +813,7 @@ wait_engine_done() {
           *)
             WAIT_ERR_SEEN="$WAIT_ERR_SEEN $f"
             code=$(grep -aoE 'ErrorCode=[0-9]+|error_code[^0-9]*[0-9]+|kErrorCode[^0-9]*[0-9]+' "$f" 2>/dev/null | grep -aoE '[0-9]+' | head -1)
-            [ -z "$code" ] && code=10
+            [ -z "$code" ] && code=99
             log "⚠ 引擎写出失败归档 $f, 判定安装失败 (错误码=${code})"
             return $code
             ;;
@@ -1057,6 +1059,19 @@ ue_snapshot_state_none() {
 
 # IDLE 闸主流程: mark 当前槽成功 -> --merge 收尾(有就合并/没有秒回) -> 双通道校验 none。
 # 返回 0=干净可安装; 1=仍未就绪(调用方必须中止, 严禁带状态硬提交撞 741)。
+# 检测"残留未激活快照": Update state=initiated 且 HAL 无可合并项(merge status=none)。
+# 这类快照是上次安装已创建目标槽快照、但从未激活/重启生效遗留的 (见 2026-09-21 复盘):
+#   它没有可 merge 的东西, --merge 推不动, idle-gate 只会反复报"收尾未完成"并中止。
+#   正确处理是 --cancel + --reset_status 丢弃 (快照指向非当前运行槽, 丢弃不影响在跑系统)。
+ue_snapshot_initiated_stale() {
+  local st
+  st=$(snapshotctl dump 2>/dev/null | grep -i 'Update state' | tail -n1)
+  # 必须是 initiated (不是 merging/在合并中), 且 HAL merge status=none (无真正待合并)
+  printf '%s' "$st" | grep -qi 'initiated' || return 1
+  ue_merge_status_none || return 1
+  return 0
+}
+
 ue_wait_idle() {
   log "  [idle-gate] 提交前闸: markBootSuccessful(txn=8, 幂等) + merge 收尾 + merge 状态校验"
   if ! pgrep -x update_engine >/dev/null 2>&1; then
@@ -1077,6 +1092,19 @@ ue_wait_idle() {
     log "  [idle-gate] ✅ 引擎已回干净 IDLE (merge status=none)"
     return 0
   fi
+  # 自愈: 残留未激活快照(initiated 但无可 merge) -> --merge 无效, 直接 reset_status 丢弃
+  if ue_snapshot_initiated_stale; then
+    log "  [idle-gate] 检测到残留未激活快照 (Update state=initiated 但无可合并项), --merge 推不动"
+    log "  [idle-gate] 自动 --cancel + --reset_status 丢弃残留 (指向非当前运行槽, 安全) ..."
+    "$UPDATE_ENGINE_CLIENT" --cancel >/dev/null 2>&1
+    "$UPDATE_ENGINE_CLIENT" --reset_status > "$TMP/ue_reset.out" 2>&1
+    log "  [idle-gate] reset_status: $(tail -n 1 "$TMP/ue_reset.out" 2>/dev/null | tr '\n' ' ')"
+    sleep 2
+    if ue_merge_status_none && ue_snapshot_state_none; then
+      log "  [idle-gate] ✅ 残留快照已丢弃, 引擎回干净 IDLE (Update state=none)"
+      return 0
+    fi
+  fi
   # 收尾未完成: 补一次引擎重启让它重排 cleanup(当前槽已 successful, 会立即通过并收尾)
   log "  [idle-gate] 收尾未完成, 重启引擎重排 cleanup 后再验一次 ..."
   setprop ctl.restart update_engine 2>/dev/null
@@ -1085,6 +1113,17 @@ ue_wait_idle() {
   if ue_merge_status_none && ue_snapshot_state_none; then
     log "  [idle-gate] ✅ 引擎已回干净 IDLE (merge status=none)"
     return 0
+  fi
+  # 重启后再兜底一次残留快照丢弃 (部分固件重排 cleanup 后才暴露 initiated 状态)
+  if ue_snapshot_initiated_stale; then
+    log "  [idle-gate] 重启后仍为残留未激活快照, 再次 reset_status 丢弃 ..."
+    "$UPDATE_ENGINE_CLIENT" --cancel >/dev/null 2>&1
+    "$UPDATE_ENGINE_CLIENT" --reset_status > "$TMP/ue_reset.out" 2>&1
+    sleep 2
+    if ue_merge_status_none && ue_snapshot_state_none; then
+      log "  [idle-gate] ✅ 残留快照已丢弃, 引擎回干净 IDLE (Update state=none)"
+      return 0
+    fi
   fi
   log "  [idle-gate] ✗ 引擎未回到干净 IDLE, 中止安装 (带状态硬提交只会被 741 拒收)"
   log "  [idle-gate]   请正常重启设备, 开机后等待 1-2 分钟再重试; 切勿反复杀引擎/清状态。"
@@ -1190,7 +1229,7 @@ ota89_cleanup_wrapper
 # 业务错误码语义: 10=签名/证书校验失败, 15=rootfs验证失败, 89/92=状态机/slot冲突,
 # 66=launch 被拒/引擎未接受(含旧逻辑误判成"成功"的客户端 RC=248, 见 run_client)。
 # 其他(含 1、248=引擎日志确认的已应用等重启、以及任何未知值)都按正常处理, 不再误杀。
-FAIL_CODES="4 9 10 15 66 89 92"
+FAIL_CODES="4 9 10 15 66 89 92 99"
 is_fail_code() {
   local c="$1" f
   for f in $FAIL_CODES; do
@@ -1216,6 +1255,7 @@ code_to_text() {
     66)  echo "状态机冲突 (kErrorCode=66, 上一次状态未清, 通常需重启后再试或 FORCE=1 强制清状态)" ;;
     21)  echo "payload 元数据大小校验失败 (kDownloadInvalidMetadataSize=21, headers 解析异常)" ;;
     42)  echo "payload 哈希/大小校验失败 (kPayloadHashMismatch/SizeMismatch=42)" ;;
+    99)  echo "引擎写出失败归档但无可解析错误码 (归档无 ErrorCode, 判为一般失败; 不触发证书回退, 详见 update_engine_log_err)" ;;
     *)   echo "未知返回码 ($1), 需结合 logcat / update_engine_log 进一步诊断" ;;
   esac
 }
@@ -1271,6 +1311,9 @@ if is_fail_code "$RC"; then
       ;;
     66)
       die "update_engine 返回 66 (launch 被拒/引擎未接受: 状态机被占用或收尾卡死, 见上方 [probe]/[idle-gate]/launch 输出; 可用『取消当前安装』走收尾解锁, 或重启设备后再试)"
+      ;;
+    99)
+      die "update_engine 写出失败归档但错误码不可解析 (未知失败; 已避免误判为证书失败, 详见 update_engine_log_err 归档)"
       ;;
     89|92)
       die "update_engine_client 返回 $RC (状态机/ slot 冲突, 通常需重启设备后再试)"
