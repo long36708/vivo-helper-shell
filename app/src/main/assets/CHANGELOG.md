@@ -1,5 +1,18 @@
 # 更新日志
 
+## v0.4.5 - 2026-09-22
+
+- OTA 安装并发安全加固：
+  - 单例锁由 pid 文件改为 `mkdir` 原子锁，并只以 `kill -0` 判定持有者存活，消除 TOCTOU，避免多实例并发互相打断安装
+  - 补齐 pid 写入窗口竞态（读到空 pid 先重读再接管，防止误接管活实例）
+  - 取消脚本新增安装锁持有状态提示（说明为何取消不清锁、如何自救）与残留快照只读提示
+- OTA 残留未激活快照自愈：检测到 initiated 但无可合并项的遗留快照时，自动 `--cancel` + `--reset_status` 丢弃；丢弃条件收紧为「HAL 查询成功且明确 none」才允许
+- OTA 错误码与状态判定修正：
+  - 不可解析的错误码由 10 改为 99（仅归档文本明确指向验证失败才保留 10，用于证书回退），99 加入 `FAIL_CODES` / `code_to_text` / `die`
+  - 拆分严格三态 `ue_hal_merge_status`，区分「干净」与「查询失败」
+  - `vivo_ota_ctrl.sh` 的 `ue_is_active` 由整文件 grep 终态改为行号比较（修「正在安装被误报成空闲」）；suspend/resume 回读只看本次新增行；孤儿日志路径 `/data/local/tmp/vivo_ota_install.log` → `/sdcard/ota.log`
+  - `vivo_ota_status.sh` 的 `detect_engine_state` 改为看最后出现的标记（修历史 IDLE/NEED_REBOOT 把在装状态误报成空闲/待重启）；暂停态按 suspending/resuming 先后判定；去掉会命中失败行的 processing 关键字
+
 ## v0.4.3 - 2026-09-13
 
 - OTA 切槽修复：从 `service list` 的**名字列**而非序号列读取 boot control 服务名，此前取到序号导致 `service call` 静默失败、切槽从未真正下发、槽位复查恒失败、markBootSuccessful 也从未下发
