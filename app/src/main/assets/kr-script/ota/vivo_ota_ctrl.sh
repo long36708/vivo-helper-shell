@@ -10,7 +10,9 @@
 # 真机实测 (V2419A / PD2419):
 #   --suspend / --resume 均被引擎正确处理 (日志见 ActionProcessor: suspending/resuming)。
 #   --suspend 无进行中更新时 rc=0 但无效果 (INFO "Command took X ms"), 故用日志回读确认。
-#   --reset_status / --cancel 见 vivo_ota.sh clear_ue_state。
+#   --reset_status / --cancel 见 vivo_ota.sh clear_ue_state;
+#   残留未激活快照(Update state=initiated 且 HAL 无可合并项)由 vivo_ota.sh 的 ue_wait_idle
+#   在提交新安装前自动 --cancel + --reset_status 丢弃。
 #   --status 是**无效 flag** (unknown command line flag), 状态只能从落盘日志判定。
 # ============================================================================
 cd /
@@ -27,18 +29,42 @@ color_stream() { sed -E \
   -e "s/(ERROR|error|Failed|failed|FAIL)/$(printf '\033[31m')&$(printf '\033[0m')/g" \
   -e "s/(suspending|resuming|UPDATED_NEED_REBOOT|overall progress|progress)/$(printf '\033[36m')&$(printf '\033[0m')/g" ; }
 
+# 日志判定工具: 最后一次命中的行号 / 文件行数 / 只看新增内容的 grep。
+# 为什么不能"整文件 grep 终态关键字": 引擎启动阶段的清理会话、上一次安装结束都会在同一份
+# 日志里留下终态行, 命中即返回会把"正在安装"误判成"空闲"(vivo_ota.sh 为此加了
+# record_log_anchor 只看锚点之后的新内容, 是同一个坑)。
+UE_TERMINAL_PAT='UPDATE_STATUS_IDLE|UPDATED_NEED_REBOOT|Boot completed, waiting on markBootSuccessful'
+UE_ACTIVE_PAT='Downloading|Applying|Verifying|Finalizing|postinstall|overall progress|Completed .* operations'
+last_hit_line() { grep -anE "$1" "$2" 2>/dev/null | tail -1 | cut -d: -f1; }
+log_lines() { [ -n "$1" ] && [ -f "$1" ] || { echo 0; return; }; wc -l < "$1" 2>/dev/null || echo 0; }
+
+# 判"本次指令"是否被引擎写进日志: $1=指令前的最新日志, $2=指令前的行数, $3=关键字。
+# 只看本次调用之后新增的内容 —— 否则上一次同类事件留下的关键字会误报成功。
+new_log_has() {
+  L1=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+  [ -n "$L1" ] || return 1
+  if [ "$L1" = "$1" ]; then
+    tail -n +$(( $2 + 1 )) "$L1" 2>/dev/null | grep -q "$3"
+  else
+    grep -q "$3" "$L1" 2>/dev/null   # 引擎轮转出新日志 -> 新文件内容都算本次的
+  fi
+}
+
 # 引擎当前是否在"进行中"(正在下载/校验/写入/清理)。
 # 判定依据(无 --status, 真机实测):
 #   1) update_engine 进程在跑
-#   2) 最新日志不含终态标记(IDLE / UPDATED_NEED_REBOOT / CLEANUP completed / "Boot completed, waiting")
+#   2) 最新日志里最后一条"活动标记"晚于最后一条"终态标记"(无终态标记时视为进行中,
+#      与旧行为一致: 只有终态在最后才判空闲)。
 ue_is_active() {
   pgrep -x update_engine >/dev/null 2>&1 || return 1
   L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
   [ -n "$L" ] || return 0   # 有进程但无日志, 视为进行中
-  # 终态关键字出现 -> 不在进行中
-  grep -qE 'UPDATE_STATUS_IDLE|UPDATED_NEED_REBOOT|Boot completed, waiting on markBootSuccessful' "$L" 2>/dev/null \
-    && return 1
-  return 0
+  T_LINE=$(last_hit_line "$UE_TERMINAL_PAT" "$L")
+  A_LINE=$(last_hit_line "$UE_ACTIVE_PAT" "$L")
+  [ -z "$T_LINE" ] && return 0                     # 无终态行 -> 进行中
+  [ -z "$A_LINE" ] && return 1                     # 有终态行且全程无活动 -> 不在进行中
+  [ "$A_LINE" -gt "$T_LINE" ] 2>/dev/null && return 0  # 活动在终态之后 -> 进行中
+  return 1                                         # 终态在最后 -> 不在进行中
 }
 
 case "$ARG" in
@@ -48,25 +74,35 @@ case "$ARG" in
       put "  (若刚点完安装, 请等几秒让引擎进入下载/写入态后再暂停)"
       exit 0
     fi
+    L0=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+    N0=$(log_lines "$L0")
     OUT=$("$CLIENT" --suspend 2>&1); RC=$?
     put "suspend 返回: $OUT (rc=$RC)"
-    # 回读最新日志确认确实进入 suspending
-    L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
-    if [ -n "$L" ] && grep -q 'suspending' "$L" 2>/dev/null; then
+    # 回读确认"本次"确实进入 suspending: 只看本次调用之后新增的行
+    # (整文件 grep 会被上次暂停留下的 suspending 命中 -> 误报成功)
+    sleep 2
+    if new_log_has "$L0" "$N0" 'suspending'; then
       put "${C_GRN}✅ 已发送暂停请求, 引擎正在挂起。${C_RST}"
       put "   需要继续时运行『恢复当前安装』。"
     else
       put "${C_YEL}⚠ 已发送暂停, 但未在日志中确认到 suspending (可能已接近完成)。${C_RST}"
     fi
-    # 写 ota.log 可见反馈 (与主安装日志同一入口, 方便一眼看到暂停事件)
-    OTA_LOG=/data/local/tmp/vivo_ota_install.log
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CTRL] suspend 指令 (rc=$RC), 引擎日志: ${L:-<无>}" >> "$OTA_LOG" 2>/dev/null
+    # 写 /sdcard/ota.log 可见反馈: 与 vivo_ota.sh / vivo_ota_status.sh 同一入口,
+    # 暂停事件跟着安装日志一起被『查看安装进度』看到。
+    # (原实现写 /data/local/tmp/vivo_ota_install.log —— 全仓无人读取该文件, 事件等于丢失)
+    if [ -w /sdcard ] || mountpoint -q /sdcard 2>/dev/null; then
+      CUR=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CTRL] suspend 指令 (rc=$RC), 引擎日志: ${CUR:-<无>}" >> /sdcard/ota.log 2>/dev/null
+    fi
     ;;
   resume)
+    L0=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+    N0=$(log_lines "$L0")
     OUT=$("$CLIENT" --resume 2>&1); RC=$?
     put "resume 返回: $OUT (rc=$RC)"
-    L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
-    if [ -n "$L" ] && grep -q 'resuming' "$L" 2>/dev/null; then
+    # 同 suspend: 只看本次调用后新增的行, 避免被上一次恢复留下的 resuming 误报成功
+    sleep 2
+    if new_log_has "$L0" "$N0" 'resuming'; then
       put "${C_GRN}✅ 已发送恢复请求, 引擎正在继续安装。${C_RST}"
     else
       put "${C_YEL}⚠ 已发送恢复, 但日志未确认 resuming (可能本就没有被暂停的任务)。${C_RST}"

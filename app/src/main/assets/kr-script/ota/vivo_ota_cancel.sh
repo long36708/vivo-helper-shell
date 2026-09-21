@@ -34,7 +34,10 @@ fi
 SKIP_RESTART=0
 if echo "$OUT" | grep -q 'CleanupPreviousUpdateAction'; then
   # 取"名字"列, 不能取第 1 列(那是序号列如 "29", 会导致 service call 服务不存在,
-  # markBootSuccessful 静默不下发)。与 vivo_ota.sh 的 boot_hal_svc() 保持一致。
+  # markBootSuccessful 静默不下发)。与 vivo_ota.sh 的 boot_hal_svc() 同样取"名字"列。
+  # 注意: 此处**刻意不**像 boot_hal_svc() 那样在"格式没认出"时兜底硬编码服务名 ——
+  #       探测不到就如实报"未找到 IBootControl 服务", 不拿猜出来的名字去 call,
+  #       免得把"设备不支持"伪装成"调用成功"(勿以"统一风格"为由改掉)。
   SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 \
         | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
   case "$SVC" in *[!0-9]*) ;; *) SVC="" ;; esac
@@ -78,6 +81,25 @@ fi
 
 echo "已尝试取消并重启 update_engine。可用『查看安装进度』确认状态。"
 
+# -------- 安装锁状态提示 (与 vivo_ota.sh 的 mkdir 单例锁对应) --------
+# 本脚本**不**清这个锁, 这是有意的: 发起安装的 vivo_ota.sh 可能仍在运行(用户在安装日志
+# 界面按的是『隐藏』而非『退出』, 进程不会结束), 此时清锁会让下一次安装与之并发, 进而
+# 互相 pkill update_engine 打断正在进行的写入(2026-09-21 复盘的假失败)。
+# 这里只报告锁的持有情况, 让用户知道下一步安装会不会被拦、以及如何自救。
+INSTALL_LOCK_DIR=/data/local/tmp/vivo_ota_install.lock
+INSTALL_LOCK_PID="$INSTALL_LOCK_DIR/pid"
+if [ -d "$INSTALL_LOCK_DIR" ]; then
+  LOCK_PID=$(cat "$INSTALL_LOCK_PID" 2>/dev/null)
+  echo ""
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+    echo "ℹ 安装脚本实例 (pid=$LOCK_PID) 仍在运行: 它退出后会自动释放安装锁。"
+    echo "   若安装日志界面还开着, 请按『退出』结束它 (按『隐藏』不会结束), 之后即可重新安装。"
+  else
+    echo "ℹ 检测到残留安装锁 (pid=${LOCK_PID:-未知} 已失效): 下次安装会自动接管, 无需处理"
+    echo "   (若仍被拦住, 可删除 $INSTALL_LOCK_DIR 后重试)。"
+  fi
+fi
+
 # 取消后的二选一引导 (借鉴 Custota 的 REVERT / resetStatus 思路):
 # 取消可能发生在不同阶段, 给出对应处置建议, 避免用户误判"是否已刷入"。
 # 注意: update_engine_client 无 --status flag (真机实测报 unknown command line flag),
@@ -95,5 +117,17 @@ elif echo "$STATE_HINT" | grep -qi 'IDLE\|finished\|cancel'; then
   echo ""
   echo "ℹ 引擎已回到可更新状态: 本次取消大概率未写入/只写了少量数据, 可安全重刷其他包。"
   echo "   如需彻底清状态重刷: 用『强制重刷(FORCE)』入口。"
+fi
+
+# 残留未激活快照提示 (只读, 不动状态):
+# 上次安装创建了目标槽快照但从未激活/重启生效时会留下 Update state=initiated, 它没有可
+# merge 的内容, 下次安装的提交前检查(idle-gate)会自动 --cancel + --reset_status 丢弃它。
+# 这里只说清楚"有这么个东西、会被自动清理", 免得用户看到安装前多等十几秒却不知原因。
+SNAP_STATE=$(snapshotctl dump 2>/dev/null | grep -i 'Update state' | tail -n1)
+if printf '%s' "$SNAP_STATE" | grep -qi 'initiated'; then
+  echo ""
+  echo "ℹ 检测到残留未激活快照 ($SNAP_STATE)。"
+  echo "   它是上次安装遗留、指向非当前运行槽, 丢弃不影响在跑系统;"
+  echo "   下次安装的提交前检查会自动丢弃清理, 无需手动处理 (想立即清干净可用『强制重刷(FORCE)』)。"
 fi
 exit 0

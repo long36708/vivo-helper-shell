@@ -24,6 +24,9 @@
 #            (含上次失败的红字) 全量回放, 避免误判本次安装失败; 引擎空闲时明确提示。
 #   P4 进度: 提取 "overall progress" / "Completed x/y operations" 百分比高亮显示,
 #            并同时跟随 update_engine_log_err/ 失败详情目录。
+#   P5 状态误报: detect_engine_state 原先用"整文件 grep 命中即返回"判 IDLE/NEED_REBOOT/暂停,
+#            同一份日志里历史会话留下的标记会把"正在安装"误报成空闲/待重启/暂停。现改为
+#            "看最后出现的标记"(行号比较); 暂停态另按 suspending/resuming 的先后单独判定。
 # ============================================================================
 cd /
 export PATH="/system/bin:/system/xbin:/sbin:/vendor/bin:/odm/bin:/data/adb/ksu/bin:/data/adb/magisk/bin:$PATH"
@@ -139,10 +142,21 @@ if [ -z "$ARG" ] && [ "$UE_LOG_WRITABLE" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 引擎状态判定: 综合 init.svc / 进程 / update_engine_client --status
-#   输出到全局: UE_STATE (IDLE / UPDATING / NEED_REBOOT / CLEANUP / STOPPED / UNKNOWN)
-#              UE_STATE_RAW (client 原始输出)
+# 引擎状态判定: 综合 init.svc / 进程 / 落盘日志关键字
+#   输出到全局: UE_STATE (IDLE / UPDATING / NEED_REBOOT / SUSPENDED / CLEANUP / STOPPED / UNKNOWN)
+#              UE_STATE_RAW (最新日志尾部原文)
 # ---------------------------------------------------------------------------
+# 状态标记正则 (由"最后出现的标记"决定当前态, 不依赖顺序)
+# 注意: 不把裸 'processing' 收进来 —— 失败行 "Aborting processing due to failure" 会命中,
+#       把失败后的空档误报成"正在安装中"。
+UE_STATE_PAT='UPDATED_NEED_REBOOT|UPDATE_STATUS_IDLE|suspending|resuming|Downloading|Applying|Verifying|Finalizing|postinstall|ActionProcessor|overall progress|Completed .* operations'
+UE_PAT_CLEANUP='Boot completed, waiting on markBootSuccessful'
+
+# 取正则 $1 在文件 $2 中"最后一次命中"的行号 (无命中则输出空)
+last_hit_line() { grep -anE "$1" "$2" 2>/dev/null | tail -1 | cut -d: -f1; }
+# 文件行数 (取不到返回 0)
+log_lines() { [ -n "$1" ] && [ -f "$1" ] || { echo 0; return; }; wc -l < "$1" 2>/dev/null || echo 0; }
+
 detect_engine_state() {
   UE_STATE=UNKNOWN
   UE_STATE_RAW=""
@@ -156,23 +170,41 @@ detect_engine_state() {
   L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
   if [ -n "$L" ]; then
     UE_STATE_RAW=$(tail -40 "$L" 2>/dev/null)
-    # 终态优先
-    if grep -q 'UPDATED_NEED_REBOOT' "$L" 2>/dev/null; then
-      UE_STATE=NEED_REBOOT
-    elif tail -40 "$L" 2>/dev/null | grep -q 'waiting on markBootSuccessful'; then
-      # 不是 IDLE! CleanupPreviousUpdateAction 卡死等待行 (2026-09-06 复盘):
-      # 引擎恒忙, 新安装会被 741 拒收, 需走『取消当前安装』的收尾解锁。
-      # 只看尾部 40 行: 该行是 cleanup 会话的启动日志, 正常收尾完成后会被后续行
-      # 推出窗口; 卡死时它始终停留在尾部 (卡死即无后续日志)。
+    # ---- 判定原则: 看"最后出现的标记", 不是"整文件命中即返回" ----
+    # 同一份日志里历史会话会留下 IDLE / UPDATED_NEED_REBOOT / suspending 等行, 命中即返回
+    # 会把"正在安装"误报成空闲/待重启/暂停(与 vivo_ota.sh 的 record_log_anchor 同源坑)。
+    P_CL=$(last_hit_line "$UE_PAT_CLEANUP" "$L")
+    P_LAST=$(last_hit_line "$UE_STATE_PAT" "$L")
+    TL=$(log_lines "$L")
+    # 1) 卡死态: CleanupPreviousUpdateAction 的等待行仍停在尾部窗口内, 且其后没有任何更晚的标记。
+    #    (该行是 cleanup 会话的启动日志, 正常收尾完成后会被后续行推出窗口; 卡死时它停在末尾)
+    #    不是 IDLE! 此状态下引擎恒忙, 新安装会被 741 拒收, 需走『取消当前安装』收尾解锁。
+    if [ -n "$P_CL" ] && [ "$TL" -gt 0 ] 2>/dev/null \
+       && [ "$((TL - P_CL))" -lt 40 ] 2>/dev/null \
+       && { [ -z "$P_LAST" ] || [ "$P_CL" -gt "$P_LAST" ] 2>/dev/null; }; then
       UE_STATE=CLEANUP
-    elif grep -qE 'UPDATE_STATUS_IDLE' "$L" 2>/dev/null; then
-      UE_STATE=IDLE
-    elif grep -q 'suspending' "$L" 2>/dev/null; then
-      # 暂停态优先于 UPDATING: 用户主动暂停后日志仍含 Downloading/ActionProcessor 等
-      # 历史行, 若放在 UPDATING 之后会被抢先判定, 故必须前置。
-      UE_STATE=SUSPENDED
-    elif grep -qE 'Downloading|Verifying|Finalizing|resuming|ActionProcessor|processing' "$L" 2>/dev/null; then
-      UE_STATE=UPDATING
+    else
+      LAST_MARK=$(grep -anE "$UE_STATE_PAT" "$L" 2>/dev/null | tail -1)
+      if [ -z "$LAST_MARK" ]; then
+        UE_STATE=UNKNOWN
+      else
+        case "$LAST_MARK" in
+          *UPDATED_NEED_REBOOT*) UE_STATE=NEED_REBOOT ;;
+          *UPDATE_STATUS_IDLE*)  UE_STATE=IDLE ;;
+          *)
+            # 最后是活动/暂停标记: 暂停后引擎可能还会补几条收尾活动行, 故暂停态单独判 ——
+            # 只在"最后一次 suspending 晚于最后一次 resuming"时才算仍在暂停(旧实现整文件
+            # grep 'suspending', 恢复后仍会一直显示"已暂停")。
+            P_SUSP=$(last_hit_line 'suspending' "$L")
+            P_RESU=$(last_hit_line 'resuming' "$L")
+            if [ -n "$P_SUSP" ] && { [ -z "$P_RESU" ] || [ "$P_SUSP" -gt "$P_RESU" ] 2>/dev/null; }; then
+              UE_STATE=SUSPENDED
+            else
+              UE_STATE=UPDATING
+            fi
+            ;;
+        esac
+      fi
     fi
   fi
   # 进程在跑但日志无明确态 -> 仍归为 UPDATING(保守)

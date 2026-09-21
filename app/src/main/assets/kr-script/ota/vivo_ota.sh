@@ -161,13 +161,9 @@ if [ "$UE_LOG_WRITABLE" = "1" ]; then
   printf '%s%s%s\n' "$C_BLU" "[vivo_ota] $(date '+%F %T') 本次日志开始 (终端带颜色, 文件纯文本: $UE_MIRROR)" "$C_RST"
 fi
 
-# ---------- 安装单例锁 (防重复点击导致两个 client 抢 engine -> 66/89) ----------
-# 借鉴 vivo_ota_status.sh 的单例锁思路: 用 pid 文件 + kill -0 存活检测。
-# 仅阻塞"真正发起安装"的入口(本脚本), 不影响 status/cancel 等只读/控制命令。
-# 自愈: 残留 pid 若已失效 -> 直接清理放行(不误拦); 若 pid 存活, 进一步判断引擎是否
-#       真在"安装中"——只有"本脚本另一个实例在跑"或"引擎确在进行中安装"才拦截,
-#       避免把"上次异常退出遗留的死锁 pid"误判成重复点击而卡死用户。
 # ---------- 安装单例锁 (原子 mkdir 锁, 防并发实例互相 pkill 打断安装) ----------
+# 借鉴 vivo_ota_status.sh 的单例锁思路, 但把"pid 文件 + kill -0"升级为 mkdir 原子锁。
+# 仅阻塞"真正发起安装"的入口(本脚本), 不影响 status/cancel 等只读/控制命令。
 # 2026-09-21 修复: 原实现用 pid 文件 + "引擎是否忙" 判据, 存在 TOCTOU 竞态 ——
 #   实例刚启动时 update_engine 尚未拉起, "引擎不忙" 恒成立, 于是每个新实例都会把
 #   仍然存活的兄弟实例误判成 "死锁/已空闲" 而清锁放行 -> 多实例并发 -> 后启动的实例
@@ -183,8 +179,17 @@ _acquire_install_lock() {
     echo "$$" > "$INSTALL_LOCK_PID" 2>/dev/null
     return 0
   fi
-  # 锁已存在: 仅凭 kill -0 判持有者是否存活
+  # 锁已存在: 仅凭 kill -0 判持有者是否存活 (绝不再用 "引擎是否忙" 作判据)
   OLD_PID=$(cat "$INSTALL_LOCK_PID" 2>/dev/null)
+  # mkdir 成功与写入 pid 之间有窗口: 读到空 pid 不能立刻判"残留", 先重读几轮。
+  # 否则会把刚 mkdir 成功、还没来得及写 pid 的兄弟实例误当残留接管 -> 两实例并存,
+  # 且落后那个退出时 trap 会删掉前者仍在使用的锁目录。
+  _i=0
+  while [ -z "$OLD_PID" ] && [ "$_i" -lt 3 ]; do
+    sleep 1
+    OLD_PID=$(cat "$INSTALL_LOCK_PID" 2>/dev/null)
+    _i=$((_i + 1))
+  done
   if [ -n "$OLD_PID" ] && [ "$OLD_PID" != "$$" ] && kill -0 "$OLD_PID" 2>/dev/null; then
     die "已有安装实例在运行 (pid=$OLD_PID), 请勿重复点击安装。如确认该进程为残留, 删除 $INSTALL_LOCK_DIR 后重试。"
   fi
@@ -759,7 +764,8 @@ run_client() {
 
 # 等待引擎后台安装完成 (替代 --follow; 轮询日志/失败归档/状态文件判定终态)。
 # 判定顺序:
-#   1) 失败归档目录(update_engine_log_err)出现新文件 -> 提取错误码(缺省 10)判失败;
+#   1) 失败归档目录(update_engine_log_err)出现新文件 -> 提取错误码判失败
+#      (提取不到时: 文本明确指向验证失败才取 10 以保留证书回退, 否则取 99=未知失败);
 #   2) 日志出现 UPDATED_NEED_REBOOT -> 成功待重启 (248);
 #   3) 日志出现 "Update successfully applied" / "SendPayloadApplicationComplete [0]" -> 成功 (0);
 #   4) 引擎回 IDLE 或进程退出但无成功标记 -> 以 prefs/update-result 判定
@@ -813,7 +819,16 @@ wait_engine_done() {
           *)
             WAIT_ERR_SEEN="$WAIT_ERR_SEEN $f"
             code=$(grep -aoE 'ErrorCode=[0-9]+|error_code[^0-9]*[0-9]+|kErrorCode[^0-9]*[0-9]+' "$f" 2>/dev/null | grep -aoE '[0-9]+' | head -1)
-            [ -z "$code" ] && code=99
+            if [ -z "$code" ]; then
+              # 归档里没有可解析的错误码: 若文本明确指出"包验证失败"仍按 10 返回,
+              # 以便保留"回退系统证书重试一次"; 其余未知失败用 99, 不再一律兜底成 10
+              # (兜底成 10 会触发无谓的证书回退, 并把诊断引向证书方向)。
+              if grep -aqiE 'Failed to verify package|PayloadVerificationError|signature verification failed' "$f" 2>/dev/null; then
+                code=10
+              else
+                code=99
+              fi
+            fi
             log "⚠ 引擎写出失败归档 $f, 判定安装失败 (错误码=${code})"
             return $code
             ;;
@@ -1039,13 +1054,26 @@ ue_hal_service() {
   [ -n "$UE_HAL_SVC" ]
 }
 
-# getSnapshotMergeStatus(txn=4, 实测映射): 返回 0=干净(none), 非0=有待合并快照
-ue_merge_status_none() {
-  ue_hal_service || return 0   # 无 HAL(非 A/B) 视为干净
-  local out ms
+# getSnapshotMergeStatus(txn=4, 实测映射) 的原始值: 0=干净(none), 非0=有待合并快照。
+# 取不到(无服务 / 输出里解析不出 Result 数值) 时返回非 0 且不输出 —— 调用方必须能区分
+# "干净" 与 "查询失败", 不能把"查不到"当成"干净"(AGENTS 已记录过这次误判的教训)。
+ue_hal_merge_status() {
+  ue_hal_service || return 1
+  local out raw ms
   out=$(service call "$UE_HAL_SVC" 4 2>/dev/null)
-  ms=$(printf '%s' "$out" | sed -n 's/.*Result: *//p' | grep -oE '0x[0-9a-fA-F]+|[0-9a-fA-F]{8}|[0-9]+' | head -1 | sed 's/^0*//')
-  [ -z "$ms" ] && ms=0
+  raw=$(printf '%s' "$out" | sed -n 's/.*Result: *//p')
+  [ -n "$raw" ] || return 1
+  ms=$(printf '%s' "$raw" | grep -oE '0x[0-9a-fA-F]+|[0-9a-fA-F]{8}|[0-9]+' | head -1 | sed 's/^0*//')
+  [ -n "$ms" ] || ms=0
+  printf '%s\n' "$ms"
+}
+
+# 宽松判定: 0=干净。无 HAL 或查询失败时按"干净"放行(由 idle-gate 的日志/进程判据兜底),
+# 保持既有主流程行为不变; 需要严格三态的地方用 ue_hal_merge_status。
+ue_merge_status_none() {
+  local ms
+  ue_hal_service || return 0   # 无 HAL(非 A/B) 视为干净
+  ms=$(ue_hal_merge_status) || return 0
   [ "$ms" = "0" ]
 }
 
@@ -1064,12 +1092,16 @@ ue_snapshot_state_none() {
 #   它没有可 merge 的东西, --merge 推不动, idle-gate 只会反复报"收尾未完成"并中止。
 #   正确处理是 --cancel + --reset_status 丢弃 (快照指向非当前运行槽, 丢弃不影响在跑系统)。
 ue_snapshot_initiated_stale() {
-  local st
+  local st ms
   st=$(snapshotctl dump 2>/dev/null | grep -i 'Update state' | tail -n1)
-  # 必须是 initiated (不是 merging/在合并中), 且 HAL merge status=none (无真正待合并)
+  # 必须是 initiated (不是 merging/在合并中)
   printf '%s' "$st" | grep -qi 'initiated' || return 1
-  ue_merge_status_none || return 1
-  return 0
+  # 且 HAL 必须"查询成功并明确返回 none(=0)"。丢弃快照是破坏性动作, 只有在确认无待合并项时
+  # 才允许; HAL 查不到(服务缺失/输出解析失败)一律返回 1 —— 宁可中止安装并提示用户重启,
+  # 也不把"查不到"当成"干净"而误丢快照。
+  ue_hal_service || return 1
+  ms=$(ue_hal_merge_status) || return 1
+  [ "$ms" = "0" ]
 }
 
 ue_wait_idle() {
@@ -1227,7 +1259,8 @@ ota89_cleanup_wrapper
 
 # 失败判定策略: 只有明确列入 FAIL_CODES 的错误码才视为失败, 其余一律当成功。
 # 业务错误码语义: 10=签名/证书校验失败, 15=rootfs验证失败, 89/92=状态机/slot冲突,
-# 66=launch 被拒/引擎未接受(含旧逻辑误判成"成功"的客户端 RC=248, 见 run_client)。
+# 66=launch 被拒/引擎未接受(含旧逻辑误判成"成功"的客户端 RC=248, 见 run_client),
+# 99=引擎写出失败归档但错误码不可解析的未知失败(不再兜底成 10, 以免触发无谓的证书回退)。
 # 其他(含 1、248=引擎日志确认的已应用等重启、以及任何未知值)都按正常处理, 不再误杀。
 FAIL_CODES="4 9 10 15 66 89 92 99"
 is_fail_code() {
@@ -1255,7 +1288,7 @@ code_to_text() {
     66)  echo "状态机冲突 (kErrorCode=66, 上一次状态未清, 通常需重启后再试或 FORCE=1 强制清状态)" ;;
     21)  echo "payload 元数据大小校验失败 (kDownloadInvalidMetadataSize=21, headers 解析异常)" ;;
     42)  echo "payload 哈希/大小校验失败 (kPayloadHashMismatch/SizeMismatch=42)" ;;
-    99)  echo "引擎写出失败归档但无可解析错误码 (归档无 ErrorCode, 判为一般失败; 不触发证书回退, 详见 update_engine_log_err)" ;;
+    99)  echo "引擎写出失败归档但错误码不可解析 (未知失败, 按一般失败处理; 归档文本明确指向验证失败时仍取 10 走证书回退, 详见 $UE_ERR_DIR 归档)" ;;
     *)   echo "未知返回码 ($1), 需结合 logcat / update_engine_log 进一步诊断" ;;
   esac
 }
@@ -1313,7 +1346,7 @@ if is_fail_code "$RC"; then
       die "update_engine 返回 66 (launch 被拒/引擎未接受: 状态机被占用或收尾卡死, 见上方 [probe]/[idle-gate]/launch 输出; 可用『取消当前安装』走收尾解锁, 或重启设备后再试)"
       ;;
     99)
-      die "update_engine 写出失败归档但错误码不可解析 (未知失败; 已避免误判为证书失败, 详见 update_engine_log_err 归档)"
+      die "update_engine 写出失败归档但错误码不可解析 (未知失败, 已避免一律误判成证书失败; 归档内容见 $UE_ERR_DIR, 并查 logcat 进一步定位)"
       ;;
     89|92)
       die "update_engine_client 返回 $RC (状态机/ slot 冲突, 通常需重启设备后再试)"
