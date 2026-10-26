@@ -16,15 +16,19 @@
 #   --status 是**无效 flag** (unknown command line flag), 状态只能从落盘日志判定。
 # ============================================================================
 cd /
-export PATH="/system/bin:/system/xbin:/sbin:/vendor/bin:/odm/bin:/data/adb/ksu/bin:/data/adb/magisk/bin:$PATH"
+
+# 共用工具 (PATH / 颜色 / boot_hal_svc / UE_LOG_DIR 等)
+OTA_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+. "$OTA_SELF_DIR/ota_common.sh"
 
 CLIENT=/system/bin/update_engine_client
-UE_LOG_DIR=/logdata/recovery/update_engine_log
 ARG="$1"; shift
 [ -x "$CLIENT" ] || { echo "FAILED: 找不到 $CLIENT"; exit 1; }
 
-C_BLU='\033[34m'; C_GRN='\033[32m'; C_YEL='\033[33m'; C_RST='\033[0m'
 put() { printf '%b\n' "$*"; }
+
+# 本脚本的输出主要是命令回显, 不做逐行关键字着色(共用库的 paint_line 需要前置颜色
+# 变量, 这里只保留 put 的简单回显), 只对引擎日志用 sed 做行内高亮。
 color_stream() { sed -E \
   -e "s/(ERROR|error|Failed|failed|FAIL)/$(printf '\033[31m')&$(printf '\033[0m')/g" \
   -e "s/(suspending|resuming|UPDATED_NEED_REBOOT|overall progress|progress)/$(printf '\033[36m')&$(printf '\033[0m')/g" ; }
@@ -176,10 +180,8 @@ case "$ARG" in
     # 探测 AIDL 接口名。
     # ⚠ 不能取 service list 的第 1 列 —— 那是**序号列**(如 "29"), service call 会报
     #    服务不存在, 表现为切槽静默无效还误报"HAL 拒绝"。必须取"名字"列。
-    #    (与 vivo_ota.sh 的 boot_hal_svc() 保持一致)
-    SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 \
-          | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
-    case "$SVC" in *[!0-9]*) ;; *) SVC="" ;; esac
+    #    共用库的 boot_hal_svc() 已实现该逻辑 (含"纯数字即丢弃"的自检)。
+    SVC=$(boot_hal_svc)
     [ -z "$SVC" ] && { put "${C_YEL}⚠ 当前环境无 android.hardware.boot.IBootControl (非 A/B 或版本过旧), 跳过切槽。${C_RST}"; exit 2; }
     put "${C_BLU}切启动槽: $SVC setActiveBootSlot($TNUM) -> $TS${C_RST}"
     # 事务码对齐 swab.sh 真机实测: 9=setActiveBootSlot

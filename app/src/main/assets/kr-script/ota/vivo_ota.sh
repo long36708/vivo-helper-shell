@@ -49,112 +49,12 @@
 # 所有命令强制 cwd=/，避免 update_engine_client 相对路径解析错误(错误89)
 cd /
 
-# 显式设置 PATH: kr-script 通过 su -c 拉起本脚本时, 其环境可能不含
-# /system/bin 等标准路径, 导致 grep/unzip/stat/awk 找不到, 进而 HEADERS
-# 为空 -> update_engine 直接返回 IDLE (刷不进去)。这里兜底导出完整 PATH。
-export PATH="/system/bin:/system/xbin:/sbin:/vendor/bin:/odm/bin:/data/adb/ksu/bin:/data/adb/magisk/bin:$PATH"
-
-# 全程日志镜像到 /sdcard/ota.log (追加, 不覆盖), 兼容 GT 查看习惯/便于回看。
-# 终端显示用 ANSI 颜色(成功绿/失败红/警告黄); 文件镜像保持纯文本(无转义, 便于 cat/回看)。
-# Android 的 /system/bin/sh 多为 mksh/ash, 故用函数级双写, 不依赖 bash 进程替换。
-UE_MIRROR=/sdcard/ota.log
-UE_LOG_WRITABLE=0
-{ [ -w /sdcard ] || mountpoint -q /sdcard 2>/dev/null; } && UE_LOG_WRITABLE=1
-
-# ANSI 颜色码 (ash 兼容: 用 printf 直接输出转义)
-C_RED=$(printf '\033[31m'); C_GRN=$(printf '\033[32m'); C_YEL=$(printf '\033[33m')
-C_BLU=$(printf '\033[34m'); C_RST=$(printf '\033[0m')
-
-# 单行着色: 根据关键字判断颜色 (大小写不敏感)
-#   error/fail/失败/错误 -> 红; success/done/成功/完成 -> 绿; warn/⚠/警告 -> 黄
-paint_line() {
-  line="$1"
-  lc=$(printf '%s' "$line" | tr 'A-Z' 'a-z')
-  case "$lc" in
-    *error*|*fail*|*失败*|*错误*|*fatal*|*denied*)
-      printf '%s%s%s\n' "$C_RED" "$line" "$C_RST" ;;
-    *success*|*done*|*成功*|*完成*|*okay*|*applied*)
-      printf '%s%s%s\n' "$C_GRN" "$line" "$C_RST" ;;
-    *warn*|*warning*|*"⚠"*|*警告*)
-      printf '%s%s%s\n' "$C_YEL" "$line" "$C_RST" ;;
-    *)
-      printf '%s\n' "$line" ;;
-  esac
-}
-
-# 实时流着色 + 文件无颜色镜像: 从 stdin 读, 终端逐行着色, 同时纯文本追加到镜像文件。
-color_stream() {
-  while IFS= read -r line; do
-    paint_line "$line"
-    [ "$UE_LOG_WRITABLE" = "1" ] && printf '%s\n' "$line" >> "$UE_MIRROR"
-  done
-}
-
-# 引擎日志只转发关键行, 过滤底层细节噪声 (文档坑: update_engine 逐行写下载/校验/
-# 写入/各 operation 细节, 一次全量包能刷出上千行, 终端与 /sdcard/ota.log 都被淹没)。
-# 关键行判定(大小写不敏感):
-#   进度: overall progress / progress / Completed * operations / bytes
-#   状态: status / UpdateStatus / ACTION / Downloading / Verifying / Applying / Finalizing
-#   终态: UPDATED_NEED_REBOOT / successfully applied / SendPayloadApplicationComplete
-#   错误: error / fail / 失败 / 错误 / fatal / denied / abort / kErrorCode
-#   其余底层行 (CowWriter/Extent/Partition/InstallOperation 等) 直接丢弃
-is_key_line() {
-  lc=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
-  case "$lc" in
-    *"overall progress"*|*"progress"*|*"completed "*"operations"*|*"operations"*|*"bytes"*|\
-    *"update status"*|*"updatestatus"*|*"status:"*|*"action"*|*"actionprocessor"*|\
-    *"downloading"*|*"verifying"*|*"applying"*|*"finalizing"*|*"postinstall"*|\
-    *"updated_need_reboot"*|*"successfully applied"*|*"sendpayloadapplicationcomplete"*|\
-    *"update successfully"*|*"boot completed"*|*"waiting on markbootsuccessful"*|\
-    *"error"*|*"fail"*|*"失败"*|*"错误"*|*"fatal"*|*"denied"*|*"abort"*|*"kerrorcode"*|\
-    *"suspending"*|*"resuming"*|*"payload"*)
-      return 0 ;;
-    *)
-      return 1 ;;
-  esac
-}
-
-# 关键行流: 仅当某行命中 is_key_line 时才着色 + 镜像, 其余丢弃。
-# 这样既保留实时进度/状态/错误可见性, 又避免引擎底层细节刷屏/灌爆 ota.log。
-filter_stream() {
-  while IFS= read -r line; do
-    if is_key_line "$line"; then
-      paint_line "$line"
-      [ "$UE_LOG_WRITABLE" = "1" ] && printf '%s\n' "$line" >> "$UE_MIRROR"
-    fi
-  done
-}
-
-# log: 终端着色输出 + 纯文本写入镜像文件
-log() { paint_line "[vivo_ota] $*"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "[vivo_ota] $*" >> "$UE_MIRROR"; }
-die() { printf '%s%s%s\n' "$C_RED" "FAILED: $*" "$C_RST"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "FAILED: $*" >> "$UE_MIRROR"; exit 1; }
-
-# 探测 Boot Control HAL 的服务名。
-#
-# ⚠ 这里曾经是 `awk '{print $1}' | tr -d ':'`, 取到的是 service list 的**序号列**
-#   而不是服务名。service list 行格式:  "<序号>\t<服务名>: [<接口名>]"
-#   后果(2026-09-13 定位): $SVC 变成 "29" 这类序号 -> service call 报服务不存在 ->
-#   ① setActiveBootSlot 静默无效(切槽从未真正下发), 却把回读为空解读成"HAL 拒绝切槽"
-#   ② getActiveBootSlot 回读为空 -> 槽位复查恒失败 -> 误判"刷入失败"
-#   ③ markBootSuccessful(txn 8) 从未下发 -> 引擎卡 CleanupPreviousUpdateAction 时
-#      脚本的解锁动作无效, 连带 ue_merge_status_none 恒返回"干净" -> IDLE 闸形同虚设
-#   所以必须取"名字"列, 并显式拒绝纯数字结果。
-boot_hal_svc() {
-    local line s
-    line=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1)
-    # 压根没有这个服务(非 A/B 设备): 输出空, 让调用方走"跳过切槽"分支。
-    # 注意不能在这里无条件兜底成标准服务名 —— 那会把"设备不支持"变成
-    # "service call 服务不存在", 被上层误读成"HAL 拒绝切槽"。
-    [ -n "$line" ] || return 0
-    s=$(printf '%s\n' "$line" | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
-    case "$s" in
-        *[!0-9]*) ;;          # 含非数字字符才算服务名
-        *) s="" ;;            # 纯数字 -> 又抓成序号了, 丢弃
-    esac
-    # 行在但格式没认出: 退回与 swab.sh 写死的真机实测名一致的兜底值
-    [ -n "$s" ] || s=android.hardware.boot.IBootControl/default
-    printf '%s\n' "$s"
-}
+# 共用工具 (PATH / 颜色 / paint_line / is_key_line / filter_stream / log / die /
+# boot_hal_svc / UE_LOG_DIR 等)。原先这些函数在本脚本与 status/ctrl/cancel 里各复制
+# 了一份, 修一个 bug 要改 4 处, 已因此漂移过一次(36cd919 服务名取错列漏改)。
+# 现统一收拢到 ota_common.sh, 本脚本只保留 OTA 安装特有的逻辑。
+OTA_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+. "$OTA_SELF_DIR/ota_common.sh"
 
 if [ "$UE_LOG_WRITABLE" = "1" ]; then
   echo "[vivo_ota] $(date '+%F %T') 本次日志开始 (同时写入 $UE_MIRROR)" >> "$UE_MIRROR"
@@ -204,8 +104,24 @@ _acquire_install_lock() {
   die "获取安装锁失败 (另一实例刚抢占锁), 请勿重复点击安装, 稍后重试。"
 }
 _acquire_install_lock
-# 脚本正常退出/被信号终止时释放锁 (kill -9 无法触发 trap, 由 kill -0 存活判定兜底)
-trap 'rm -rf "$INSTALL_LOCK_DIR" 2>/dev/null' EXIT
+# 脚本正常退出/被信号终止时释放锁 (kill -9 无法触发 trap, 由 kill -0 存活判定兜底)。
+# ⚠ 只删自己持有的锁: 原实现无条件 rm -rf, 若本实例是"接管失败但仍在运行"的后来者,
+#   退出时会把另一个存活实例正在用的锁目录删掉, 于是下一次安装与之并发 ->
+#   互相 pkill update_engine 打断写入(2026-09-21 复盘的假失败)。
+#   先校验 pid 文件内容是否仍是自己, 是才删。
+_release_install_lock() {
+  [ "$(cat "$INSTALL_LOCK_PID" 2>/dev/null)" = "$$" ] || return 0
+  rm -rf "$INSTALL_LOCK_DIR" 2>/dev/null
+}
+# ota89 包装器的清理也挂在这里: attempt_install 内部会 die(exit 1) 直接退出,
+# 原先写在调用之后的那行 cleanup 永远执行不到, 导致 GT 工具目录被永久改成包装器。
+_cleanup_on_exit() {
+  # OTA89_WRAPPER_ACTIVE 只可能由 ota89_install_wrapper 置 1, 用它判断函数是否已定义
+  # (脚本在函数定义之前就 die 时不能调用未定义函数)。
+  [ "$OTA89_WRAPPER_ACTIVE" = "1" ] && ota89_cleanup_wrapper
+  _release_install_lock
+}
+trap '_cleanup_on_exit' EXIT
 
 # 记录安装开始时间(用于小结耗时统计)。用 date +%s 取 Unix 秒(原生 sh 无 $SECONDS 保证,
 # 且脚本可能被 source 进其他 shell, 自管时间戳更可靠)。
@@ -529,13 +445,25 @@ fi
 #   2) spoof_append_header 把 5 项写进 HEADERS, update_engine 据此写入目标槽 vendor/odm 覆盖;
 #   3) resetprop 即时写入当前系统, 使 ApplyPayload 阶段的版本/SPL/ARB 校验读到伪值。
 # POWERWASH=1 则令 update_engine 应用完后自动恢复出厂(清空用户数据)。两项默认关闭。
-spoof_append_header() { # key value
-  # 仅当该 key 尚未在 headers 中出现时才追加, 避免覆盖包内原生值
-  case "$HEADERS" in
-    *"$1"*) : ;;   # 已存在, 跳过
-    *) HEADERS="${HEADERS}
-$1=$2" ;;
-  esac
+spoof_append_header() { # key value [replace]
+  # 只按「行首 KEY=」精确匹配, 绝不用全文子串。
+  # 原先写的是 `case "$HEADERS" in *"$1"*)`, POWERWASH 会被包里本来就有的
+  # POWERWASH=0 命中而跳过追加 —— 用户勾了『恢复出厂』却静默不生效, 属于数据安全问题。
+  # 第三参数 replace: 已存在时覆盖为新值(POWERWASH 需要把包内的 0 改成 1);
+  # 缺省 append 语义: 已存在则保留包内原生值(SPF 属性不该覆盖包内声明)。
+  local k="$1" v="$2" mode="${3:-append}" cur
+  cur=$(printf '%s\n' "$HEADERS" | awk -v p="$k=" 'index($0, p) == 1 { print; exit }')
+  if [ -n "$cur" ]; then
+    [ "$mode" = "replace" ] || return 0
+    [ "$cur" = "$k=$v" ] && return 0
+    # 只替换第一处, 其余重复键原样保留 (不丢数据)
+    HEADERS=$(printf '%s\n' "$HEADERS" | awk -v p="$k=" -v nv="$k=$v" '
+      index($0, p) == 1 && !done { print nv; done = 1; next }
+      { print }')
+    return 0
+  fi
+  HEADERS="${HEADERS}
+$k=$v"
 }
 
 # 目标包伪值: 与 dg_install.sh ①.1 一致, 从 metadata 解析
@@ -595,7 +523,14 @@ fi
 
 if [ "$POWERWASH" = "1" ]; then
   log "恢复出厂(POWERWASH): 将在 OTA 应用完成后触发 factory reset (⚠ 会清空用户数据!)"
-  spoof_append_header "POWERWASH" "1"
+  # replace 语义: 标准 Android 的 payload_properties.txt 通常已带 POWERWASH=0,
+  # 必须把它改成 1, 否则用户勾了恢复出厂却静默不生效。
+  spoof_append_header "POWERWASH" "1" replace
+  # 回读确认, 避免又出现"日志说已启用、实际没生效"的静默失败
+  case "$HEADERS" in
+    *"POWERWASH=1"*) log "  ✅ headers 已确认 POWERWASH=1" ;;
+    *) log "  🚨 headers 中 POWERWASH 未能置为 1, 恢复出厂不会生效! 请勿依赖本次清数据" ;;
+  esac
 fi
 
 # ---------- 5. 证书绕过 (可选; 对齐 GT: 多数官方多代号包用系统证书即可过) ----------
@@ -669,8 +604,19 @@ setprop vota.virtual_ab.debug.thermal_threshold 120000 2>/dev/null
 log "温控绕过: vota.virtual_ab.debug.thermal_threshold=$(getprop vota.virtual_ab.debug.thermal_threshold 2>/dev/null) (默认46C已拉高到120C)"
 
 # ---------- 6. 当前 slot ----------
-CUR_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null || echo "_a")
-TARGET_SLOT=$( [ "$CUR_SLOT" = "_a" ] && echo "_b" || echo "_a" )
+# ⚠ 不能用 `getprop ... || echo "_a"` 兜底: getprop 对不存在的属性返回**空字符串且
+#   rc=0**, `||` 分支永远不触发。于是 CUR_SLOT 为空、TARGET_SLOT 被算成 "_a";
+#   若设备实际跑在 _b 而属性读不到, 目标槽就等于当前槽 —— 切槽变成切到当前槽、
+#   LK 也刷到当前运行侧, 正是注释里警告的"硬砖"场景。
+# 读不到就按"非 A/B"处理: 不切槽、不刷 LK, 只正常写包。
+CUR_SLOT=$(getprop ro.boot.slot_suffix 2>/dev/null)
+case "$CUR_SLOT" in
+  _a|_b) TARGET_SLOT=$( [ "$CUR_SLOT" = "_a" ] && echo "_b" || echo "_a" ) ;;
+  *)
+    log "⚠ 读不到 ro.boot.slot_suffix (当前值='${CUR_SLOT:-空}'), 按非 A/B 设备处理: 本次不切槽"
+    TARGET_SLOT=""
+    ;;
+esac
 log "当前 slot=$CUR_SLOT 目标 slot=$TARGET_SLOT"
 
 # ---------- 6.5 OTA89 非守护保护 (借鉴 vivo_ota89_fix 思路, 但不用 daemon) ----------
@@ -878,8 +824,12 @@ wait_engine_done() {
     sleep 5
     waited=$((waited + 5))
   done
-  log "⚠ 等待引擎完成超时 (${timeout}s), 未判定失败, 请用『查看安装进度』确认结果"
-  return 0
+  log "⚠ 等待引擎完成超时 (${timeout}s): 安装状态未知, 本次不按成功处理"
+  log "   → 不切槽(无法确认写入完成, 切槽后重启会被回滚清空)"
+  log "   → 请用『查看安装进度』确认; 若稍后日志出现 UPDATED_NEED_REBOOT,"
+  log "     再回来用『手动切启动槽』下发切槽, 然后重启"
+  log "   → 未确认写入前请勿把本次结果当作刷机完成"
+  return 124
 }
 
 # update_engine 的 UPDATED_NEED_REBOOT 等状态会持久化在 /data/misc/update_engine 下,
@@ -952,8 +902,7 @@ FORCE_REFRESH=0
 # vivo 的 update_engine 是后台 daemon, 进度不回显到终端, 只落盘到:
 #   /logdata/recovery/update_engine_log/update_engine.*
 # 为实时展示进度, 安装期间后台轮询该日志目录并把增量转发到终端(着色)+纯文本镜像; 安装结束后停掉。
-UE_LOG_DIR=/logdata/recovery/update_engine_log
-UE_ERR_DIR=/logdata/recovery/update_engine_log_err
+# (UE_LOG_DIR / UE_ERR_DIR 由 ota_common.sh 定义, 勿在此重复赋值)
 UE_TAIL_PID=0
 
 # 为什么不用 tail -F:
@@ -1289,25 +1238,14 @@ code_to_text() {
     21)  echo "payload 元数据大小校验失败 (kDownloadInvalidMetadataSize=21, headers 解析异常)" ;;
     42)  echo "payload 哈希/大小校验失败 (kPayloadHashMismatch/SizeMismatch=42)" ;;
     99)  echo "引擎写出失败归档但错误码不可解析 (未知失败, 按一般失败处理; 归档文本明确指向验证失败时仍取 10 走证书回退, 详见 $UE_ERR_DIR 归档)" ;;
+    124) echo "等待引擎完成超时, 安装状态未知 (非失败也非成功: 未切槽, 请用『查看安装进度』确认后再决定)" ;;
     *)   echo "未知返回码 ($1), 需结合 logcat / update_engine_log 进一步诊断" ;;
   esac
 }
 
-# 248 = UPDATED_NEED_REBOOT: 上一次刷的包已应用、正等重启生效, 视为成功(只是需重启)。
-# # 默认提示重启即可, 不重刷(避免覆盖已刷好的包)。FORCE_REFRESH=1 才清状态强制重刷。
-# if [ "$RC" -eq 248 ] 2>/dev/null || grep -q "waiting for reboot" /proc/self/fd/2 2>/dev/null; then
-#   if [ "$FORCE_REFRESH" = "1" ]; then
-#     log "检测到 UPDATED_NEED_REBOOT, 但 FORCE=1 已设定: 清空状态并强制重刷当前包"
-#     clear_ue_state
-#     setprop ctl.start update_engine 2>/dev/null
-#     sleep 3
-#     run_client
-#     RC=$?
-#   else
-#     log "update_engine 处于 UPDATED_NEED_REBOOT: 上一次刷的包已应用, 等待重启生效(视为成功)"
-#     log "  请重启设备让已刷入的包生效。若确认要放弃旧包强制重刷当前包, 设 FORCE=1 或第7参数(force)传 1 后重试。"
-#   fi
-# fi
+# 248 = UPDATED_NEED_REBOOT 的强制重刷分支已移除 (2026-10-25): 原实现被整段注释掉,
+# 是死代码; 实际语义由 wait_engine_done 返回 248 + 段7 切槽 + 段9 重启引导覆盖。
+# 需要强制重刷时用『强制重刷(FORCE)』开关, 它走 clear_ue_state。
 
 # 回退1: 证书绕过校验失败(错误码10=验证失败) -> 回退系统证书重试一次
 # 注意: 仅当证书绕过确实生效过(CERT_ACTIVE=1)才回退, 避免无谓重试。
@@ -1356,34 +1294,14 @@ fi
 
 log "update_engine_client 返回 $RC ($(code_to_text "$RC"))"
 
-# ---------- 8. 保留 ROOT (已移除, 2026-08-26) ----------
+# ---------- 8. 保留 ROOT: 已彻底移除 (2026-08-26) ----------
 # 移除原因:
 #   1) 之前"假成功"误判会把已修补的 init_boot 刷入, 之后平刷同包触发校验报错。
 #   2) init_boot ROOT 刷入失败时, 会阻止后续 LK 修补刷入, 存在变砖风险。
 # 故 OTA 安装不再支持一并 ROOT; 需要 ROOT 请单独用 KernelSU/Magisk 操作。
-# 脚本侧保留 ROOT_ENABLED=0 硬关闭, 即便通过环境变量误传入也不会执行写入。
-#   环境变量 ROOT_PART / ROOT_IMG 仍可单独覆盖, 但本开关恒为 0。
+# 代码块已于 2026-10-25 删除 (原为 ROOT_ENABLED=0 硬关闭的死代码)。
+# ROOT_ENABLED 常量保留, 供 print_install_env 判断是否打印 ROOT 方案(恒为 0, 即不打印)。
 ROOT_ENABLED=0
-ROOT_PART="${ROOT_PART:-init_boot}"
-ROOT_IMG="${ROOT_IMG:-}"
-if [ "$ROOT_ENABLED" = "1" ]; then
-  [ -n "$ROOT_IMG" ] || die "开启'保留 ROOT'后必须指定已修补的镜像文件路径 (ROOT_IMG)"
-  [ -f "$ROOT_IMG" ] || die "指定的 ROOT 镜像不存在: $ROOT_IMG"
-
-  case "$ROOT_PART" in
-    boot|init_boot) ;;
-    *) die "ROOT 分区只能是 boot 或 init_boot, 当前: $ROOT_PART" ;;
-  esac
-
-  BOOT_DEV=/dev/block/by-name/${ROOT_PART}${TARGET_SLOT}
-  [ -b "$BOOT_DEV" ] || BOOT_DEV=/dev/block/bootdevice/by-name/${ROOT_PART}${TARGET_SLOT}
-  [ -b "$BOOT_DEV" ] || die "找不到目标分区设备: $BOOT_DEV"
-
-  log "保留 ROOT: 将用户镜像写入 $ROOT_PART$TARGET_SLOT ($BOOT_DEV)"
-  log "  镜像: $ROOT_IMG"
-  dd if="$ROOT_IMG" of="$BOOT_DEV" bs=4096 || die "写入 $BOOT_DEV 失败"
-  log "  已写入 $ROOT_PART$TARGET_SLOT, 请确认镜像与机型/内核匹配"
-fi
 
 # ---------- 9. 完成 ----------
 # 进度已通过 run_client 后台 launch + start_ue_log_tail 增量转发到终端, 无需再提示"正在写入"。
@@ -1482,9 +1400,22 @@ SWITCH_RC=0
 SWITCH_BLOCK_REBOOT=0
 INSTALL_WRITTEN=0
 SLOT_PENDING=0
+# RC 语义 (wait_engine_done 的返回值):
+#   0   = 引擎日志确认写入成功 (SendPayloadApplicationComplete [0] / update-result=0)
+#   1   = 引擎以 1 退出但无失败迹象 (历史兼容, 仍按成功)
+#   248 = UPDATED_NEED_REBOOT (写入完成, 待重启生效)
+#   124 = **等待超时, 状态未知** —— 绝不能当成功! 引擎可能还在写, 此时切槽/刷 LK
+#         会在重启后被引擎回滚清空, 且 LK 已是新版本而系统还是旧的。
+# 超时曾经 `return 0`, 于是下游把它当"写入成功"去切槽+刷 LK, 属于假成功(第三次同类
+# 教训, 前两次是 248 与 HAL 查不到)。现在超时单独一个码, 下面按"状态未知"处理。
 if [ "$RC" = "0" ] || [ "$RC" = "1" ] || [ "$RC" = "248" ]; then
   INSTALL_WRITTEN=1
-  switch_active_slot "$TARGET_SLOT"; SWITCH_RC=$?
+  if [ -z "$TARGET_SLOT" ]; then
+    log "ℹ 无目标槽信息(非 A/B), 跳过切槽。"
+    SWITCH_RC=2
+  else
+    switch_active_slot "$TARGET_SLOT"; SWITCH_RC=$?
+  fi
   case "$SWITCH_RC" in
     0) SLOT_PENDING=1 ;;                 # A/B: 指令已下发但未经校验 -> 不自动重启
     2) log "ℹ 非 A/B 设备, 无需切槽。" ;;  # 无 AIDL 接口
@@ -1537,6 +1468,13 @@ if [ "$LK_ENABLED" = "1" ]; then
   fi
   [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
   [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
+
+  # ⚠ 目标槽未知时禁止自动探测: 无 $TARGET_SLOT 的候选会退化成无后缀的 lk,
+  #   在 A/B 机型上可能正是**当前运行槽**; 刷当前运行侧会在下次重启(哪怕是用户
+  #   手动重启)立刻生效, LK 与在跑系统不匹配即硬砖。此时必须由用户显式给 LK_DEV。
+  if [ -z "$TARGET_SLOT" ] && [ -z "$LK_DEV" ]; then
+    die "读不到目标槽(ro.boot.slot_suffix 为空), 无法安全推断 LK 分区。请设 LK_DEV 精确指定设备节点, 或取消勾选『刷入 LK』。"
+  fi
 
   if [ -n "$LK_DEV" ]; then
     LK_DEV_NODE="$LK_DEV"
@@ -1627,7 +1565,10 @@ if [ "$5" = "1" ]; then
   # (修订 2026-08-27: 此处原误读 $6(实际是 force 开关), 会导致勾"强制重刷"意外自动重启)
   log "──────────── 安装小结 ────────────"
   print_install_env
-  if [ "$SWITCH_BLOCK_REBOOT" = "1" ]; then
+  if [ "$RC" = "124" ]; then
+    log "⏸ 安装状态未知(等待超时), 已阻止自动重启。"
+    log "   请先用『查看安装进度』确认引擎状态; 确认 UPDATED_NEED_REBOOT 后再手动重启。"
+  elif [ "$SWITCH_BLOCK_REBOOT" = "1" ]; then
     log "🚨 切槽调用异常或 LK 回读校验未通过, 已阻止自动重启。请按上面提示处理后再重启。"
   elif [ "$SLOT_PENDING" = "1" ]; then
     # B 方案: 切槽结果未经校验 -> 不替用户按重启键
@@ -1647,7 +1588,11 @@ else
   # 用户不勾 reboot 时最容易困惑"刷完没反应", 这里补上收尾提示 + 小结。
   log "──────────── 安装小结 ────────────"
   print_install_env
-  if [ "$INSTALL_WRITTEN" != "1" ]; then
+  if [ "$RC" = "124" ]; then
+    log "⚠ 安装状态未知(等待超时), 本次未切槽、未按成功处理。"
+    log "   请用『查看安装进度』确认; 若日志稍后出现 UPDATED_NEED_REBOOT,"
+    log "   再用『辅助 → 手动切启动槽』下发切槽, 确认待生效槽后再重启。"
+  elif [ "$INSTALL_WRITTEN" != "1" ]; then
     log "⚠ 本次写入未确认成功(RC=$RC), 请先按上方提示处理, 不要直接重启。"
   elif [ "$SLOT_PENDING" = "1" ]; then
     log "⚠ 包已写入 $TARGET_SLOT, 但切槽结果未经校验。"

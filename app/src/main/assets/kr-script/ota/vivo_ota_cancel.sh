@@ -1,7 +1,14 @@
 #!/system/bin/sh
 # 取消当前 OTA 安装 (对齐 GT 玩机助手 quit.sh: update_engine_client --cancel)
 cd /
-export PATH="/system/bin:/system/xbin:/sbin:/vendor/bin:/odm/bin:/data/adb/ksu/bin:/data/adb/magisk/bin:$PATH"
+
+# 共用工具 (PATH / 颜色 / boot_hal_svc / UE_LOG_DIR 等)
+OTA_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+# 本脚本刻意使用 strict 模式: 探测不到 IBootControl 就如实报"未找到", 不拿猜出来的
+# 服务名去 call —— 否则会把"设备不支持"伪装成"调用成功"。
+OTA_HAL_STRICT=1
+. "$OTA_SELF_DIR/ota_common.sh"
+
 CLIENT=/system/bin/update_engine_client
 [ -x "$CLIENT" ] || { echo "FAILED: 找不到 $CLIENT"; exit 1; }
 
@@ -34,13 +41,9 @@ fi
 SKIP_RESTART=0
 if echo "$OUT" | grep -q 'CleanupPreviousUpdateAction'; then
   # 取"名字"列, 不能取第 1 列(那是序号列如 "29", 会导致 service call 服务不存在,
-  # markBootSuccessful 静默不下发)。与 vivo_ota.sh 的 boot_hal_svc() 同样取"名字"列。
-  # 注意: 此处**刻意不**像 boot_hal_svc() 那样在"格式没认出"时兜底硬编码服务名 ——
-  #       探测不到就如实报"未找到 IBootControl 服务", 不拿猜出来的名字去 call,
-  #       免得把"设备不支持"伪装成"调用成功"(勿以"统一风格"为由改掉)。
-  SVC=$(service list 2>/dev/null | grep -i 'IBootControl' | head -n1 \
-        | grep -oE '[A-Za-z0-9_.]+/[A-Za-z0-9_.]+' | head -n1)
-  case "$SVC" in *[!0-9]*) ;; *) SVC="" ;; esac
+  # markBootSuccessful 静默不下发)。共用库 boot_hal_svc() 已实现, 且本脚本以
+  # OTA_HAL_STRICT=1 启用 strict 模式 —— 探测不到就返回空, 不兜底猜服务名。
+  SVC=$(boot_hal_svc)
   echo "检测到引擎卡在 CleanupPreviousUpdateAction (等 markBootSuccessful), cancel 动不了, 走收尾解锁 ..."
   if [ -n "$SVC" ]; then
     echo "调 $SVC markBootSuccessful (txn=8, 幂等) 标记当前槽启动成功 ..."
@@ -104,7 +107,7 @@ fi
 # 取消可能发生在不同阶段, 给出对应处置建议, 避免用户误判"是否已刷入"。
 # 注意: update_engine_client 无 --status flag (真机实测报 unknown command line flag),
 #       状态只能从落盘日志 (/logdata/recovery/update_engine_log) 关键字判定。
-UE_LOG_DIR=/logdata/recovery/update_engine_log
+# (UE_LOG_DIR 由 ota_common.sh 定义)
 LAST_LOG=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
 STATE_HINT=""
 [ -n "$LAST_LOG" ] && STATE_HINT=$(grep -aoE 'UPDATED_NEED_REBOOT|UPDATE_STATUS_IDLE|ActionProcessor: (suspending|resuming|finished)|Downloading|Verifying|Finalizing' "$LAST_LOG" 2>/dev/null | tail -1)

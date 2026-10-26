@@ -29,10 +29,12 @@
 #            "看最后出现的标记"(行号比较); 暂停态另按 suspending/resuming 的先后单独判定。
 # ============================================================================
 cd /
-export PATH="/system/bin:/system/xbin:/sbin:/vendor/bin:/odm/bin:/data/adb/ksu/bin:/data/adb/magisk/bin:$PATH"
 
-UE_LOG_DIR=/logdata/recovery/update_engine_log
-UE_ERR_DIR=/logdata/recovery/update_engine_log_err
+# 共用工具 (PATH / 颜色 / paint_line / is_key_line / filter_stream / log 等)。
+# 原先这些在本脚本与 vivo_ota.sh 各复制一份, 已因此漂移过一次; 现统一收拢。
+OTA_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+. "$OTA_SELF_DIR/ota_common.sh"
+
 CLIENT=/system/bin/update_engine_client
 ARG="$1"
 
@@ -42,70 +44,6 @@ TAIL_LINES="${OTA_TAIL_LINES:-40}"
 POLL_SEC="${OTA_POLL_SEC:-2}"
 # 单例锁 / pid 文件
 LOCK_PID_FILE=/data/local/tmp/vivo_ota_status.pid
-
-# 全程日志镜像到 /sdcard/ota.log (追加, 纯文本); 终端显示带 ANSI 颜色。
-UE_MIRROR=/sdcard/ota.log
-UE_LOG_WRITABLE=0
-{ [ -w /sdcard ] || mountpoint -q /sdcard 2>/dev/null; } && UE_LOG_WRITABLE=1
-
-# ANSI 颜色码
-C_RED=$(printf '\033[31m'); C_GRN=$(printf '\033[32m'); C_YEL=$(printf '\033[33m')
-C_BLU=$(printf '\033[34m'); C_CYN=$(printf '\033[36m'); C_RST=$(printf '\033[0m')
-
-# 单行着色: 进度行优先(青色高亮), 其余按关键字判断 (大小写不敏感)
-paint_line() {
-  line="$1"
-  lc=$(printf '%s' "$line" | tr 'A-Z' 'a-z')
-  case "$lc" in
-    *"overall progress"*|*"completed "*"operations"*)
-      printf '%s%s%s\n' "$C_CYN" "$line" "$C_RST" ;;
-    *error*|*fail*|*失败*|*错误*|*fatal*|*denied*)
-      printf '%s%s%s\n' "$C_RED" "$line" "$C_RST" ;;
-    *success*|*done*|*成功*|*完成*|*okay*|*applied*)
-      printf '%s%s%s\n' "$C_GRN" "$line" "$C_RST" ;;
-    *warn*|*warning*|*"⚠"*|*警告*)
-      printf '%s%s%s\n' "$C_YEL" "$line" "$C_RST" ;;
-    *)
-      printf '%s\n' "$line" ;;
-  esac
-}
-
-# 实时流着色 + 文件无颜色镜像
-color_stream() {
-  while IFS= read -r line; do
-    paint_line "$line"
-    [ "$UE_LOG_WRITABLE" = "1" ] && printf '%s\n' "$line" >> "$UE_MIRROR"
-  done
-}
-
-# 引擎日志只转发关键行, 过滤底层细节噪声 (update_engine 一次全量包能刷上千行,
-# 逐行下载/校验/写入的 operation 细节对普通用户无意义且淹没进度/错误)。
-# 关键行判定(大小写不敏感): 进度 / 状态 / 终态 / 错误 / 轮转提示 / 失败归档上下文。
-is_key_line() {
-  lc=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
-  case "$lc" in
-    *"overall progress"*|*"progress"*|*"completed "*"operations"*|*"operations"*|*"bytes"*|\
-    *"update status"*|*"updatestatus"*|*"status:"*|*"action"*|*"actionprocessor"*|\
-    *"downloading"*|*"verifying"*|*"applying"*|*"finalizing"*|*"postinstall"*|\
-    *"updated_need_reboot"*|*"successfully applied"*|*"sendpayloadapplicationcomplete"*|\
-    *"update successfully"*|*"boot completed"*|*"waiting on markbootsuccessful"*|\
-    *"error"*|*"fail"*|*"失败"*|*"错误"*|*"fatal"*|*"denied"*|*"abort"*|*"kerrorcode"*|\
-    *"suspending"*|*"resuming"*|*"payload"*)
-      return 0 ;;
-    *)
-      return 1 ;;
-  esac
-}
-
-# 关键行流: 仅命中 is_key_line 的行才着色 + 镜像, 其余丢弃。
-filter_stream() {
-  while IFS= read -r line; do
-    if is_key_line "$line"; then
-      paint_line "$line"
-      [ "$UE_LOG_WRITABLE" = "1" ] && printf '%s\n' "$line" >> "$UE_MIRROR"
-    fi
-  done
-}
 
 # 普通提示: 终端着色 + 纯文本写文件
 put() { paint_line "$*"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "$*" >> "$UE_MIRROR"; }

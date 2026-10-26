@@ -228,6 +228,23 @@ class DialogLogFragment : DialogFragment() {
                 (logView.parent as? ScrollView)?.fullScroll(ScrollView.FOCUS_DOWN)
             }
         }
+
+        /**
+         * 输出指定颜色的内容。
+         *
+         * 覆盖基类实现: 若该行含 ANSI SGR 转义(脚本用 `printf '\033[31m...'` 着色),
+         * 解析成逐段 Span; 否则沿用基类的整行着色。见 [ShellHandlerBase.ansiToSpanned]。
+         */
+        override fun updateLog(msg: Any?, color: Int) {
+            if (msg == null) return
+            val text = msg.toString()
+            val styled = ShellHandlerBase.ansiToSpanned(text, color)
+            if (styled != null) {
+                updateLog(styled)
+            } else {
+                super.updateLog(msg, color)
+            }
+        }
     }
 
     private fun closeView() {

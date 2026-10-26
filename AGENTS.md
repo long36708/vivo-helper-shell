@@ -116,6 +116,42 @@ for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
 
 ## OTA 强刷脚本（kr-script/ota/）
 
+### 脚本结构与共用库（2026-10-25 收拢）
+
+`ota_common.sh` 存放 5 个脚本共用的 PATH / 颜色 / `paint_line` / `is_key_line` / `filter_stream` / `color_stream` / `log` / `die` / `boot_hal_svc` / `UE_LOG_DIR`。各脚本以
+
+```sh
+OTA_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+. "$OTA_SELF_DIR/ota_common.sh"
+```
+
+引入。**修共用逻辑只改 `ota_common.sh`**，别再往各脚本里复制一份 —— 36cd919 修「服务名取错列」时就是因为有 5 份副本而漏改复发过。
+
+- `OTA_HAL_STRICT=1` 让 `boot_hal_svc` 在"行在但格式没认出"时不兜底猜服务名（`vivo_ota_cancel.sh` 用这个模式）。
+- `vivo_ota_ctrl.sh` 保留自己的 `color_stream`：它的 `put` 用 `printf '%b'`，与共用库的逐行 case 着色语义不同。
+
+### 日志着色：ANSI 由 Kotlin 侧解析（2026-10-25 前完全无效）
+
+脚本用 `printf '\033[31m...'` 着色，但 `ShellHandlerBase` 原先只按 stdout/stderr 整行染色，**不解析转义序列** —— 控制字符原样进 TextView，红色告警不会变红。现 `ShellHandlerBase.ansiToSpanned()` 解析 SGR（30-37/90-97 设前景色，39/0 复位，其余码丢弃），`DialogLogFragment.MyShellHandler.updateLog` 优先走它；整行无 SGR 时回退原逻辑，行为不变。
+
+注意 `paint_line` 的判定顺序是 error → success → warn，**先命中即返回**：警告文案里出现"成功/完成"会被染绿。
+
+### `is_key_line` 的关键词不能过宽
+
+曾用裸 `*payload*` / `*bytes*` / `*action*`，而 update_engine 的日志模块名就叫 `payload_consumer` / `payload_verifier` / `delta_performer`，几乎每行都含 `payload` —— 等于不过滤。现改为 `payload.bin` / `payload_metadata` / `additional payloads` / `payloadverificationerror` 等具体串。
+
+### `spoof_append_header` 必须按行首精确匹配键名
+
+曾用 `case "$HEADERS" in *"$1"*)` 做"是否已存在"判定。标准 Android 的 `payload_properties.txt` 通常已带 `POWERWASH=0`，于是勾了『恢复出厂』却**静默不生效**（数据安全问题）。现改为按行首 `KEY=` 匹配；第三参数 `replace` 覆盖为新值（POWERWASH 需要 0→1），缺省 `append` 保留包内原生值（SPF 属性不该覆盖）。
+
+### 槽位属性读不到时不得猜目标槽
+
+`getprop` 对不存在的属性返回**空串且 rc=0**，所以 `getprop ... || echo "_a"` 的 `||` 分支永不触发。原写法下 `CUR_SLOT` 为空、`TARGET_SLOT` 被算成 `_a`；若设备实际跑在 `_b`，目标槽等于当前槽 → 切槽切到当前槽、LK 刷到当前运行侧（硬砖场景）。现 `CUR_SLOT` 为空时 `TARGET_SLOT` 留空，按非 A/B 处理；此时若勾了『刷入 LK』又没有 `LK_DEV`，直接 die（无后缀的 `lk` 探测在 A/B 机型上可能正是当前槽）。
+
+### 安装锁的 trap 只删自己持有的锁
+
+`_release_install_lock` 先校验 pid 文件内容是否为 `$$` 再 `rm -rf`。原实现无条件删，会让"接管失败但仍在运行"的后来者删掉存活实例的锁，导致下一次安装并发并互相 pkill 打断写入。ota89 包装器的清理也挂在同一个 EXIT trap 上（`attempt_install` 内部的 `die` 会 `exit 1`，原先写在调用之后的 cleanup 永远执行不到）。
+
 ### Boot Control HAL 事务码（PD2419 真机实测，2026-09-06）
 
 `service call android.hardware.boot.IBootControl/default <txn>`：
@@ -157,6 +193,14 @@ case "$s" in *[!0-9]*) ;; *) s="" ;; esac   # 纯数字 = 又抓成序号了
 服务行**不存在**时必须返回空（让调用方走「非 A/B 设备，跳过」分支），**不要**无条件兜底成标准服务名 —— 那会把「设备不支持」变成「service call 服务不存在」，同样被误读成「HAL 拒绝」。
 
 > 这条失效路径推翻了此前部分结论（「HAL 拒绝切槽」「引擎卡死解不开」可能都只是没调到服务）。txn 表本身来自 swab.sh（写死全名）的真机验证，仍然有效；但修好后上述场景需要重新实测。
+
+### 等待超时 ≠ 成功（第三次同类假成功，2026-10-25 修复）
+
+`wait_engine_done` 超时分支曾 `return 0` 并打印"未判定失败"，但下游把 0 当成功：段7 置 `INSTALL_WRITTEN=1` → 切槽，段8.6 → 刷 LK。于是"引擎可能还在写"被报成"包已写入目标槽，重启即可生效"，重启后引擎回滚清空，而 LK 已是新版本、系统还是旧的。
+
+现改为超时返回 **124**（独立码，不在 FAIL_CODES 也不在成功集），段7 跳过切槽、段9 按"状态未知"提示，让用户去『查看安装进度』确认后再手动切槽。默认超时 1800s。
+
+**同类教训序列**：248 不是 UPDATED_NEED_REBOOT → HAL 查不到不能当"干净" → 超时不能当成功。**凡是"状态未知"，都不得被下游当作某个确定结果。**
 
 ### 返回码 248 的双重语义（曾致假成功）
 
