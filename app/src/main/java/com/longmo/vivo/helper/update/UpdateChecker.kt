@@ -33,8 +33,8 @@ object UpdateChecker {
 
     private const val RELEASE_API = "https://api.github.com/repos/long36708/vivo-helper-shell/releases/latest"
 
-    // com.longmo.vivo.helper-v0.4.6(84)-release.apk -> ("0.4.6", 84)
-    private val ASSET_VERSION_REGEX = Regex("""v(\d+(?:\.\d+)+)\((\d+)\)""")
+    // 本地构建名是 v0.4.7(88)，但 GitHub 上传资产时会把括号清洗成点：v0.4.7.88. —— 两种都要能解析
+    private val ASSET_VERSION_REGEX = Regex("""v(\d+(?:\.\d+)*)[.(](\d+)[.)]""")
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
