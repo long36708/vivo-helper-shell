@@ -28,6 +28,7 @@ import androidx.viewpager2.widget.ViewPager2
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.longmo.vivo.helper.databinding.ActivityMainBinding
 import com.longmo.vivo.helper.ad.AdManager
+import com.longmo.vivo.helper.update.UpdateManager
 import com.longmo.vivo.helper.util.chooseFilePath
 import com.krscripts.core.config.PageConfigReader
 import com.krscripts.core.config.PageConfigSh
@@ -100,6 +101,9 @@ class MainActivity : KrActivity() {
             buildNavgationMenu(currentPageConfigs())
 
             progressBarDialog.hideDialog()
+
+            // 主页就绪后自动检查更新（24h 节流、失败静默，非强制）
+            UpdateManager.autoCheckOnStartup(this@MainActivity)
         }
     }
 
@@ -378,6 +382,12 @@ class MainActivity : KrActivity() {
                             }
                         }
                     }
+                }
+
+                // 检查更新：关闭关于弹窗后走更新流程（GitHub Release，非强制）
+                layout.findViewById<MaterialButton>(R.id.btn_check_update)?.setOnClickListener {
+                    aboutDialog?.dismiss()
+                    UpdateManager.manualCheck(this)
                 }
 
                 // 更新日志：点击后读取内置 CHANGELOG.md 并弹窗展示

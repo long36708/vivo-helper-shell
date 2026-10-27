@@ -97,5 +97,6 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.material)
     implementation(libs.play.services.ads)
+    implementation(libs.okhttp)
     implementation(project(":core"))
 }

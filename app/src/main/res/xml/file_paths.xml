@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 在线更新下载的 APK 存放目录（getExternalFilesDir("update")） -->
+    <external-files-path
+        name="update_apk"
+        path="update/" />
+    <files-path
+        name="update_apk_internal"
+        path="update/" />
+</paths>
