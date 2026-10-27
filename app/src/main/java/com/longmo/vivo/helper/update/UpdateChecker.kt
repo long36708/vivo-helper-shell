@@ -139,7 +139,10 @@ object UpdateChecker {
      */
     suspend fun downloadApk(release: ReleaseInfo, destFile: File, onProgress: suspend (Long, Long) -> Unit) =
         withContext(Dispatchers.IO) {
-            val directUrl = "https://github.com/$REPO/releases/download/${release.tagName}/${release.apkName}"
+            // 清单里的 apk 是本地构建名（带括号），GitHub 实际资产名会把括号清洗成点
+            // （v0.4.8(92) → v0.4.8.92.）；拼 URL 前做同样清洗，兼容旧清单
+            val apkForUrl = release.apkName.replace("(", ".").replace(")", ".")
+            val directUrl = "https://github.com/$REPO/releases/download/${release.tagName}/$apkForUrl"
             val sources = listOf(directUrl) + DOWNLOAD_MIRRORS.map { it + directUrl }
 
             var lastError: Exception? = null
