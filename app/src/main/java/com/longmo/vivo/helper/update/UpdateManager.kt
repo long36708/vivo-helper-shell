@@ -114,7 +114,7 @@ object UpdateManager {
             .setMessage(message)
             .setCancelable(true)
 
-        if (release.apkUrl.isEmpty()) {
+        if (release.apkName.isEmpty()) {
             // 无 APK 资产：只给发布页出口
             builder.setPositiveButton(R.string.update_btn_view_page) { _, _ -> openReleasePage(activity, release) }
         } else {
@@ -160,7 +160,7 @@ object UpdateManager {
 
         downloadJob = activity.lifecycleScope.launch {
             try {
-                UpdateChecker.downloadApk(release.apkUrl, destFile) { done, total ->
+                UpdateChecker.downloadApk(release, destFile) { done, total ->
                     currentCoroutineContext().ensureActive()
                     withContext(Dispatchers.Main) {
                         if (activity.isFinishing || activity.isDestroyed) return@withContext

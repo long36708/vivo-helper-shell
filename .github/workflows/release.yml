@@ -118,3 +118,52 @@ jobs:
           files: app/build/outputs/apk/release/*.apk
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      # 应用内更新不走 GitHub API（gh-proxy 类加速不代理 api.github.com，国内不可达），
+      # 改为发版时把版本清单写进仓库 update/latest.json —— 仓库文件可被 raw / jsDelivr / gh-proxy 全部代理
+      - name: Write update manifest (update/latest.json)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          NAME=$(basename "$APK")
+          SHA=$(sha256sum "$APK" | awk '{print $1}')
+          SIZE=$(stat -c%s "$APK")
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          # 本地构建名带括号：...-v0.4.8(89)-release.apk → 89
+          CODE=$(printf '%s' "$NAME" | sed -nE 's/.*v[0-9.]+\(([0-9]+)\)-.*/\1/p')
+          if [ -z "$CODE" ]; then
+            echo "::error::cannot parse versionCode from asset name: $NAME"
+            exit 1
+          fi
+
+          # 发布说明取刚创建的 release body，截断 1500 字符；失败不阻塞发版
+          NOTES=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+            | jq -r '.body // ""' | head -c 1500) || NOTES=""
+
+          # 清单基于最新 main 提交（tag 后 main 可能有新提交，避免 push 被拒）
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B manifest origin/main
+
+          mkdir -p update
+          jq -n --arg tag "$TAG" --arg vn "$VER" --arg code "$CODE" --arg apk "$NAME" \
+                --arg size "$SIZE" --arg sha "$SHA" \
+                --arg url "https://github.com/${{ github.repository }}/releases/tag/$TAG" \
+                --arg notes "$NOTES" \
+            '{tag:$tag, versionName:$vn, versionCode:($code|tonumber), apk:$apk,
+              apkSize:($size|tonumber), sha256:$sha, htmlUrl:$url, notes:$notes}' > update/latest.json
+
+          git add update/latest.json
+          if git diff --cached --quiet; then
+            echo "manifest unchanged, skip commit"
+          else
+            # [skip ci] 避免清单提交再触发一次 Android CI
+            git commit -m "chore(release): update latest.json for $TAG [skip ci]"
+            git push origin HEAD:main
+          fi
