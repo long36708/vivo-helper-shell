@@ -1,116 +1,124 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- 包一层 ScrollView：入口按钮增多后整体高度可能超过弹窗上限，
+     不滚动会被压缩/裁切（捐赠按钮被挤压即此因），过高时改为可滚动 -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:gravity="center"
-    android:orientation="vertical"
-    android:padding="@dimen/activity_horizontal_margin">
+    android:scrollbars="none">
 
-    <com.google.android.material.imageview.ShapeableImageView
-        android:id="@+id/app_logo"
-        android:layout_width="80dp"
-        android:layout_height="80dp"
-        android:layout_marginTop="16dp"
-        android:contentDescription="@string/app_name"
-        android:padding="2dp"
-        android:scaleType="fitCenter"
-        android:src="@mipmap/ic_launcher"
-        app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Medium" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/app_name"
-        android:textAlignment="center"
-        android:textColor="?colorOnSurface"
-        android:textAppearance="@style/TextAppearance.Material3.HeadlineMedium.Emphasized"/>
-
-    <TextView
-        android:id="@+id/tv_app_version"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="@string/app_version"
-        android:textAlignment="center"
-        android:textColor="?colorOutline"
-        android:textAppearance="@style/TextAppearance.Material3.BodySmall.Emphasized" />
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="@dimen/activity_horizontal_margin">
 
-    <TextView
-        android:id="@+id/tv_app_author"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginTop="11dp"
-        android:text="@string/app_author"
-        android:textColor="?colorPrimary"
-        android:textColorLink="?colorPrimary"
-        android:autoLink="web"
-        android:linksClickable="true" />
+        <com.google.android.material.imageview.ShapeableImageView
+            android:id="@+id/app_logo"
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:layout_marginTop="16dp"
+            android:contentDescription="@string/app_name"
+            android:padding="2dp"
+            android:scaleType="fitCenter"
+            android:src="@mipmap/ic_launcher"
+            app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Medium" />
 
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginTop="36dp"
-        android:layout_marginBottom="16dp"
-        android:alpha="0.3"
-        android:background="?colorOutline" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/app_name"
+            android:textAlignment="center"
+            android:textColor="?colorOnSurface"
+            android:textAppearance="@style/TextAppearance.Material3.HeadlineMedium.Emphasized"/>
 
-    <TextView
-        android:id="@+id/tv_framework_info"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/framework_info"
-        android:textAlignment="textEnd"
-        android:alpha="0.5"
-        android:textColor="?colorOutline"
-        android:textSize="11sp" />
+        <TextView
+            android:id="@+id/tv_app_version"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/app_version"
+            android:textAlignment="center"
+            android:textColor="?colorOutline"
+            android:textAppearance="@style/TextAppearance.Material3.BodySmall.Emphasized" />
 
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/framework_author"
-        android:textAlignment="textEnd"
-        android:alpha="0.5"
-        android:textColor="?colorOutline"
-        android:textSize="11sp" />
+        <TextView
+            android:id="@+id/tv_app_author"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="11dp"
+            android:text="@string/app_author"
+            android:textColor="?colorPrimary"
+            android:textColorLink="?colorPrimary"
+            android:autoLink="web"
+            android:linksClickable="true" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btn_check_update"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginTop="12dp"
-        android:text="@string/btn_check_update"
-        style="?attr/materialButtonOutlinedStyle" />
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="24dp"
+            android:layout_marginBottom="16dp"
+            android:alpha="0.3"
+            android:background="?colorOutline" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btn_changelog"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginTop="12dp"
-        android:text="@string/btn_changelog"
-        style="?attr/materialButtonOutlinedStyle" />
+        <TextView
+            android:id="@+id/tv_framework_info"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/framework_info"
+            android:textAlignment="textEnd"
+            android:alpha="0.5"
+            android:textColor="?colorOutline"
+            android:textSize="11sp" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btn_donate"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginTop="12dp"
-        android:text="@string/btn_donate"
-        android:contentDescription="@string/donate_desc"
-        style="?attr/materialButtonOutlinedStyle" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/framework_author"
+            android:textAlignment="textEnd"
+            android:alpha="0.5"
+            android:textColor="?colorOutline"
+            android:textSize="11sp" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btn_reset_egg"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:layout_marginTop="12dp"
-        android:text="@string/reset_egg"
-        android:visibility="gone"
-        style="?attr/materialButtonOutlinedStyle" />
-</LinearLayout>
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_check_update"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="12dp"
+            android:text="@string/btn_check_update"
+            style="?attr/materialButtonOutlinedStyle" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_changelog"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="8dp"
+            android:text="@string/btn_changelog"
+            style="?attr/materialButtonOutlinedStyle" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_donate"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="8dp"
+            android:text="@string/btn_donate"
+            android:contentDescription="@string/donate_desc"
+            style="?attr/materialButtonOutlinedStyle" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_reset_egg"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="8dp"
+            android:text="@string/reset_egg"
+            android:visibility="gone"
+            style="?attr/materialButtonOutlinedStyle" />
+    </LinearLayout>
+</ScrollView>
