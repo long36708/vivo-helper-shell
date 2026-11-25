@@ -10,7 +10,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
@@ -32,6 +31,7 @@ import com.krscripts.core.model.PageNode
 import com.krscripts.core.model.PickerNode
 import com.krscripts.core.model.RunnableNode
 import com.krscripts.core.model.SelectItem
+import com.krscripts.core.util.linkIntent
 import com.krscripts.core.model.SwitchNode
 import com.krscripts.core.shortcut.ActionShortcutManager
 import kotlinx.coroutines.Dispatchers
@@ -209,7 +209,7 @@ class ActionListFragment : Fragment(), PageLayoutRender.OnItemClickListener {
         if (nodeUnlocked(item)) {
             if (context != null && item.link.isNotEmpty()) {
                 try {
-                    val intent = Intent(Intent.ACTION_VIEW, item.link.toUri())
+                    val intent = linkIntent(item.link)
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context?.startActivity(intent)
                 } catch (_: Exception) {

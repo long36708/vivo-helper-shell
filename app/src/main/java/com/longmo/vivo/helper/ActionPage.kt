@@ -7,7 +7,6 @@ import android.os.Bundle
 import android.view.Menu
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
-import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
@@ -28,6 +27,7 @@ import com.krscripts.core.shortcut.ActionShortcutManager
 import com.krscripts.core.ui.ActionListFragment
 import com.krscripts.core.ui.PageMenuLoader
 import com.krscripts.core.ui.ParamsFileChooserRender
+import com.krscripts.core.util.linkIntent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -115,7 +115,7 @@ open class ActionPage : KrActivity() {
                 }
 
                 if (page.link.isNotEmpty()) {
-                    val intent = Intent(Intent.ACTION_VIEW, page.link.toUri())
+                    val intent = linkIntent(page.link)
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     this.startActivity(intent)
                 }

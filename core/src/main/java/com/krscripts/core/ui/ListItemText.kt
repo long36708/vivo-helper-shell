@@ -3,7 +3,6 @@ package com.krscripts.core.ui
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
-import android.net.Uri
 import android.text.Layout
 import android.text.SpannableString
 import android.text.Spanned
@@ -23,6 +22,7 @@ import com.krscripts.core.R
 import com.krscripts.core.TryOpenActivity
 import com.krscripts.core.executor.ScriptEnvironment
 import com.krscripts.core.model.TextNode
+import com.krscripts.core.util.linkIntent
 
 class ListItemText(
     private val context: Context,
@@ -56,7 +56,7 @@ class ListItemText(
                         override fun onClick(widget: View) {
                             if (row.link.isNotEmpty()) {
                                 try {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(row.link))
+                                    val intent = linkIntent(row.link)
                                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                     context.startActivity(intent)
                                 } catch (ex: Exception) {
