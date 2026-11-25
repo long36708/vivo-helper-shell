@@ -243,6 +243,8 @@ case "$s" in *[!0-9]*) ;; *) s="" ;; esac   # 纯数字 = 又抓成序号了
 
 **下载前 HEAD 探测**：`probeFastestSource()` 对「直连 + 各镜像」并发发 HEAD，选最先返回 2xx 的源下载，避免国内直连必等 8s 连接超时。探测全失败时回退原有串行回退。注意 OkHttp 默认跟随重定向，直连的 302 会被跟到 CDN 的 200。
 
+**清单选择必须「取 versionCode 最大」而不是「最先返回者胜」**（2026-11-26 实测）：jsDelivr 的 `@main` 缓存最长 12 小时——v0.4.9 发布后实测它仍返回 v0.4.8（code=92、无 mirrors），加 `?t=` 查询参数也穿透不了（jsDelivr 按路径缓存）。若按最先返回者胜，国内只有 jsDelivr 可达时会把新版误判成「已是最新」。现 `fetchLatestRelease()` 在 `MANIFEST_SETTLE_MS`（6s）窗口内收齐各源，取 `versionCode` 最大者，对任何源的陈旧缓存免疫。代价是检查耗时从「最快源延迟」变成「最慢源延迟（上限 6s）」，清单仅几百字节，可接受。
+
 **已验证节点**（2026-11-26 实测，清单拉取）：`gh-proxy.com` 1.5s、`jsDelivr` 3.2s、`ghfast.top` 3.8s 均 200。**`gh-proxy.org` 不可用**——连接超时，且裸域返回 `Web-Server: gh-proxy.com`，是同一服务的别名，不构成冗余，别加。
 
 ### 清单里的 apk 字段必须是 GitHub 清洗后的真实资产名

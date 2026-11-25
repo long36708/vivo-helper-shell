@@ -8,6 +8,7 @@ import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -66,6 +67,10 @@ object UpdateChecker {
     // HEAD 全失败时回退到串行下载（兜底，兼容不支持 HEAD 的节点）。
     private const val PROBE_TIMEOUT_MS = 6_000L
 
+    // 清单收齐窗口：并发拉各源后等这么久，取 versionCode 最大的清单。
+    // 清单本身仅几百字节，多等 2~4s 换来的是「不被任何源的陈旧缓存骗成已是最新」。
+    private const val MANIFEST_SETTLE_MS = 6_000L
+
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)
@@ -88,23 +93,40 @@ object UpdateChecker {
             }
         }
         val pending = attempts.toMutableList()
+        var best: ReleaseInfo? = null
         var sawNotFound = false
         var lastError: Throwable? = null
+        val deadline = System.currentTimeMillis() + MANIFEST_SETTLE_MS
         try {
+            // 不能「最先返回者胜」：jsDelivr 的 @main 缓存最长 12 小时，发版后它可能仍返回
+            // 上一版清单，先到反而会把新版判成「已是最新」。改为在 settle 窗口内收齐各源，
+            // 取 versionCode 最大者 —— 对任何源的陈旧缓存都免疫。
             while (pending.isNotEmpty()) {
-                val winner = select<ManifestAttempt> {
-                    pending.forEach { (_, deferred) -> deferred.onAwait { it } }
-                }
+                val remain = deadline - System.currentTimeMillis()
+                if (remain <= 0) break
+                val winner = withTimeoutOrNull(remain) {
+                    select<ManifestAttempt> {
+                        pending.forEach { (_, deferred) -> deferred.onAwait { it } }
+                    }
+                } ?: break
                 pending.removeAll { it.first == winner.url }
-                winner.info?.let {
-                    return@withContext it
+                val info = winner.info
+                if (info != null) {
+                    if (info.versionCode > (best?.versionCode ?: -1)) best = info
+                } else if (winner.error == null) {
+                    sawNotFound = true
+                } else {
+                    lastError = winner.error
                 }
-                if (winner.error == null) sawNotFound = true else lastError = winner.error
             }
         } finally {
             coroutineContext.cancelChildren()
         }
-        if (sawNotFound) null else throw (lastError ?: IOException("all manifest sources failed"))
+        when {
+            best != null -> best
+            sawNotFound -> null
+            else -> throw (lastError ?: IOException("all manifest sources failed"))
+        }
     }
 
     private class ManifestAttempt(val url: String, val info: ReleaseInfo?, val error: Throwable?)
