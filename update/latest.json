@@ -6,5 +6,9 @@
   "apkSize": 13353049,
   "sha256": "89bc5c70c53b11960aa07a6479e235764af7c260fdb53c591e084e0585944c91",
   "htmlUrl": "https://github.com/long36708/vivo-helper-shell/releases/tag/v0.4.8",
-  "notes": "**Full Changelog**: https://github.com/long36708/vivo-helper-shell/compare/v0.4.7...v0.4.8"
+  "notes": "**Full Changelog**: https://github.com/long36708/vivo-helper-shell/compare/v0.4.7...v0.4.8",
+  "mirrors": [
+    "https://gh-proxy.com/",
+    "https://ghfast.top/"
+  ]
 }

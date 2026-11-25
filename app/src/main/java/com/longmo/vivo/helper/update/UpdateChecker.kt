@@ -24,7 +24,9 @@ data class ReleaseInfo(
     val htmlUrl: String,
     val apkName: String,
     val apkSize: Long,
-    val sha256: String
+    val sha256: String,
+    /** 下载代理前缀，来自清单的 mirrors 字段；空则回退 [DEFAULT_DOWNLOAD_MIRRORS]。 */
+    val mirrors: List<String> = emptyList()
 )
 
 /**
@@ -43,7 +45,9 @@ object UpdateChecker {
     // ===== 加速源配置（节点失效时只改这里）=====
     private const val REPO = "long36708/vivo-helper-shell"
 
-    // 清单源：并发竞速，任一成功即用。raw 直连对海外最快，jsDelivr / gh-proxy 供国内回退
+    // 清单源：并发竞速，任一成功即用。这些是「种子源」，必须内置 ——
+    // 因为 mirrors 配置本身就在清单里，没有种子源就拉不到远端配置。
+    // 国内至少 jsDelivr / gh-proxy / ghfast 可达，实测 200。
     private val MANIFEST_URLS = listOf(
         "https://raw.githubusercontent.com/$REPO/main/update/latest.json",
         "https://cdn.jsdelivr.net/gh/$REPO@main/update/latest.json",
@@ -51,11 +55,16 @@ object UpdateChecker {
         "https://ghfast.top/https://raw.githubusercontent.com/$REPO/main/update/latest.json"
     )
 
-    // 下载镜像：在原始资产 URL 前加前缀（gh-proxy 系支持 releases/download）
-    private val DOWNLOAD_MIRRORS = listOf(
+    // 下载镜像兜底：仅当清单里 mirrors 字段缺失/为空时使用（兼容旧清单）。
+    // 正常情况下以清单里远端配置的 mirrors 为准，节点失效改 JSON 即可，无需发版。
+    private val DEFAULT_DOWNLOAD_MIRRORS = listOf(
         "https://gh-proxy.com/",
         "https://ghfast.top/"
     )
+
+    // 下载探测：并发 HEAD 选最快可达节点，避免国内直连必等 8s 超时；
+    // HEAD 全失败时回退到串行下载（兜底，兼容不支持 HEAD 的节点）。
+    private const val PROBE_TIMEOUT_MS = 6_000L
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -120,6 +129,10 @@ object UpdateChecker {
         if (tag.isEmpty() || versionName.isEmpty() || apk.isEmpty()) {
             throw IOException("manifest fields missing")
         }
+        // mirrors 来自清单（远端可配）；缺失/类型不对时留空，下载时回退内置默认
+        val mirrors = json.optJSONArray("mirrors")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+        }.orEmpty()
         return ReleaseInfo(
             tagName = tag,
             versionName = versionName,
@@ -128,12 +141,13 @@ object UpdateChecker {
             htmlUrl = json.optString("htmlUrl").ifEmpty { "https://github.com/$REPO/releases/tag/$tag" },
             apkName = apk,
             apkSize = json.optLong("apkSize", 0L),
-            sha256 = json.optString("sha256")
+            sha256 = json.optString("sha256"),
+            mirrors = mirrors
         )
     }
 
     /**
-     * 多源下载 APK 到指定文件：直连 → 各镜像前缀，逐源尝试；
+     * 多源下载 APK 到指定文件：先用 HEAD 并发探测选最快可达源，再逐源回退；
      * 每源下载完做 SHA-256 校验（清单提供），不匹配视为该源失败换下一源。
      * [onProgress] 回调 (已下载字节, 总字节-未知为 -1)；失败/取消时清理半成品。
      */
@@ -143,10 +157,16 @@ object UpdateChecker {
             // （v0.4.8(92) → v0.4.8.92.）；拼 URL 前做同样清洗，兼容旧清单
             val apkForUrl = release.apkName.replace("(", ".").replace(")", ".")
             val directUrl = "https://github.com/$REPO/releases/download/${release.tagName}/$apkForUrl"
-            val sources = listOf(directUrl) + DOWNLOAD_MIRRORS.map { it + directUrl }
+            // 优先用清单里远端配置的 mirrors；旧清单无该字段时回退内置默认
+            val mirrorPrefixes = release.mirrors.ifEmpty { DEFAULT_DOWNLOAD_MIRRORS }
+            val sources = listOf(directUrl) + mirrorPrefixes.map { it + directUrl }
+
+            // 并发 HEAD 探测，把最快可达的源排到最前；探测全失败则保持原顺序串行回退
+            val fastest = probeFastestSource(sources)
+            val ordered = if (fastest != null) listOf(fastest) + sources.filter { it != fastest } else sources
 
             var lastError: Exception? = null
-            for ((index, url) in sources.withIndex()) {
+            for (url in ordered) {
                 try {
                     downloadFrom(url, release, destFile, onProgress)
                     return@withContext
@@ -155,10 +175,50 @@ object UpdateChecker {
                     throw e
                 } catch (e: Exception) {
                     destFile.delete()
-                    lastError = IOException("${sourceLabel(index)}: ${e.message}", e)
+                    lastError = IOException("${sourceLabel(url, directUrl)}: ${e.message}", e)
                 }
             }
             throw lastError ?: IOException("all download sources failed")
+        }
+
+    /**
+     * 并发对候选源发 HEAD，返回**最先成功**（2xx）的那个 URL。
+     *
+     * 目的：国内直连 github.com 几乎必失败，串行等它 8s 超时纯属浪费；
+     * 先把所有源一起探活，谁快用谁。全部失败/超时返回 null，调用方走串行兜底。
+     * 用独立的短超时 client，避免探测拖到读超时 30s。
+     */
+    private suspend fun probeFastestSource(sources: List<String>): String? =
+        withContext(Dispatchers.IO) {
+            val probeClient = client.newBuilder()
+                .connectTimeout(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .readTimeout(PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .build()
+            val probes = sources.map { url ->
+                url to async {
+                    try {
+                        val request = Request.Builder().url(url).head().build()
+                        probeClient.newCall(request).execute().use { response ->
+                            if (response.isSuccessful) url else null
+                        }
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+            }
+            val pending = probes.toMutableList()
+            try {
+                while (pending.isNotEmpty()) {
+                    val winner = select<Pair<String, String?>> {
+                        pending.forEach { (url, deferred) -> deferred.onAwait { url to it } }
+                    }
+                    pending.removeAll { it.first == winner.first }
+                    if (winner.second != null) return@withContext winner.second
+                }
+            } finally {
+                coroutineContext.cancelChildren()
+            }
+            null
         }
 
     private suspend fun downloadFrom(
@@ -207,9 +267,15 @@ object UpdateChecker {
         }
     }
 
-    private fun sourceLabel(index: Int): String = when (index) {
-        0 -> "直连"
-        else -> "加速源$index"
+    /** 失败提示带具体域名，用户看到 "HTTP 502" 时知道是哪个节点挂了。 */
+    private fun sourceLabel(url: String, directUrl: String): String {
+        if (url == directUrl) return "直连"
+        val host = try {
+            java.net.URI.create(url).host ?: url
+        } catch (_: Exception) {
+            url
+        }
+        return "代理 $host"
     }
 
     /** 有新版本判定：versionCode 严格大于当前值为主；无法取得时回退 semver。 */

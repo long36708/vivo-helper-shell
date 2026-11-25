@@ -12,9 +12,6 @@
 #   而 local.properties 已被 .gitignore 忽略，CI 中默认不存在 ——
 #   因此未配置 Secret 时 signingConfigs 不会创建，Release 变体回退到 debug 签名
 #   （仍可安装，但无法覆盖安装正式签名包）。
-#
-# AdMob（可选）—— 用仓库 Variables 覆盖代码内的官方测试 ID：
-#   ADMOB_APP_ID / ADMOB_APP_OPEN_ID / ADMOB_BANNER_ID / ADS_ENABLED
 name: Release
 
 on:
@@ -95,12 +92,6 @@ jobs:
             echo "::warning::KEYSTORE_* secrets not set -> release APK falls back to DEBUG signing."
           fi
 
-          add_var() { [ -n "$2" ] && echo "$1=$2" >> local.properties || true; }
-          add_var ADMOB_APP_ID "${{ vars.ADMOB_APP_ID }}"
-          add_var ADMOB_APP_OPEN_ID "${{ vars.ADMOB_APP_OPEN_ID }}"
-          add_var ADMOB_BANNER_ID "${{ vars.ADMOB_BANNER_ID }}"
-          add_var ADS_ENABLED "${{ vars.ADS_ENABLED }}"
-
       - name: Build Release APK
         run: ./gradlew "-Dorg.gradle.java.installations.paths=$JAVA_HOME" :app:assembleRelease --no-configuration-cache --stacktrace
 
@@ -154,13 +145,23 @@ jobs:
           git fetch origin main
           git checkout -B manifest origin/main
 
+          # ------------------------------------------------------------------
+          # 下载代理节点（远端可配）：节点失效时改这里，并手动改一次仓库里的
+          # update/latest.json 的 mirrors 字段即可生效，无需重发 APK。
+          # 下次发版 CI 会用这里的列表覆盖清单。
+          # 注意：gh-proxy.org 是 gh-proxy.com 的别名（同一 cloudflare 后端），
+          #       不构成冗余，别同时加。
+          # ------------------------------------------------------------------
+          MIRRORS_JSON='["https://gh-proxy.com/","https://ghfast.top/"]'
+
           mkdir -p update
           jq -n --arg tag "$TAG" --arg vn "$VER" --arg code "$CODE" --arg apk "$APK_REAL" \
                 --arg size "$SIZE" --arg sha "$SHA" \
                 --arg url "https://github.com/${{ github.repository }}/releases/tag/$TAG" \
-                --arg notes "$NOTES" \
+                --arg notes "$NOTES" --argjson mirrors "$MIRRORS_JSON" \
             '{tag:$tag, versionName:$vn, versionCode:($code|tonumber), apk:$apk,
-              apkSize:($size|tonumber), sha256:$sha, htmlUrl:$url, notes:$notes}' > update/latest.json
+              apkSize:($size|tonumber), sha256:$sha, htmlUrl:$url, notes:$notes,
+              mirrors:$mirrors}' > update/latest.json
 
           git add update/latest.json
           if git diff --cached --quiet; then
