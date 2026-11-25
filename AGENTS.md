@@ -71,21 +71,39 @@
 - [ ] 长耗时脚本的执行前提示是否写在 `desc`（`warning` 在有 `<param>` 的 action 上不生效）？是否区分了『退出』（杀脚本）与『隐藏』（不杀）？
 - [ ] 新增日志行是否避开"成功/完成"等词（否则警告行会被 `paint_line` 染成绿色）？
 
+### 暗码 link 必须用 ACTION_DIAL（2026-11-25 真机定位）
+
+`<page link="tel:...">` 点击后打不开对应界面、但手动在拨号盘输入可以 —— 根因是启动 intent 的 action。
+
+`core/util/LinkIntent.kt` 的 `linkIntent()` 按 scheme 选 action：`tel:` → `ACTION_DIAL`，其余保持 `ACTION_VIEW`。三处调用点（`ActionListFragment.onPageClick`、`ListItemText` 的 ClickableSpan、`ActionPage`）统一走它，**不要在调用点各自 new Intent(ACTION_VIEW, ...)**。
+
+真机对比（PD2419）：
+- `ACTION_VIEW` + `tel:%2A%2309%23` → 只停在 `TwelveKeyDialer` 拨号盘
+- `ACTION_DIAL` + `tel:%2A%2309%23` → 拉起 `com.vos.user.vit/.ImageImeiInfo`
+- `ACTION_DIAL` + `tel:%2A%23%2A%234636%23%2A%23%2A` → 拉起 `Settings$TestingSettingsActivity`
+
+两种 action 解析到的是同一个拨号器组件（`com.android.contacts/.dialer.TwelveKeyDialer`），差别只在拨号器对 action 的处理。历史背景：`859033a` 把暗码从 `<action><script>am start -a DIAL ...</script></action>` 改成 `<page link>` 时用了 `ACTION_VIEW`，导致暗码失效。
+
+**验证注意**：用 `cmd activity start` 从 shell 测 tel: 暗码时，拨号器残留的 singleTask 旧 task 会干扰结果 —— 每次必须先 `cmd activity force-stop com.android.contacts` 再测，否则新 intent 可能被旧 task 吸收、看到的是上一次的 intent，导致误判。
+
+**不要在此处解码 URI**：暗码里的 `%2A/%23` 必须由拨号器按 intent data 解码，提前解码会让 `#` 变成 fragment 分隔符而截断暗码。
+
 ### 电话暗码 tel: 编码（反复踩坑，务必照模板）
 
-用 `am start -a android.intent.action.DIAL -d "tel:..."` 触发工程暗码时，`*` 和 `#` 必须 URL 编码：`*`→`%2A`，`#`→`%23`。**手写替换极不可靠，已连续两次漏字符**，必须改完用脚本复核。
+`*` 和 `#` 都要 URL 编码：`*`→`%2A`，`#`→`%23`。**手写替换极不可靠，已连续两次漏字符**，必须改完用脚本复核。
 
-正确模板（已修复）：
+正确模板：
 - `*#XXXX#`        → `tel:%2A%23XXXX%23`
 - `*#*#XXXX#*#*`   → `tel:%2A%23%2A%23XXXX%23%2A%23%2A`
-- 也可用半明文（vivo 拨号器能处理，不必编码 `*`）：`tel:*%232288%23*%23*`
 
 复核方法（改完跑一次，确认解码 == 原暗码再提交/构建）：
 ```python
 import re, urllib.parse
 t = open("app/src/main/assets/kr-script/secret_codes/secret_codes.xml", encoding="utf-8").read()
-for title, d in re.findall(r'<action title="([^"]+)">.*?tel:([^"]+)"', t, re.S):
-    print(title.split("(")[0].strip(), "=>", urllib.parse.unquote(d))
+for title, d in re.findall(r'<page title="([^"]+)".*?link="([^"]+)"', t):
+    got = urllib.parse.unquote(d)
+    expect = re.search(r'\(([^)]+)\)', title).group(1)
+    print(f'{"OK" if got == "tel:"+expect else "MISMATCH"}  {expect} => {got}')
 ```
 
 ### 执行界面：『退出』会杀脚本，『隐藏』不会（DialogLogFragment）
@@ -211,6 +229,25 @@ case "$s" in *[!0-9]*) ;; *) s="" ;; esac   # 纯数字 = 又抓成序号了
 引擎带未完成收尾启动时会卡在 `Boot completed, waiting on markBootSuccessful()`：当前槽未被标记 boot successful（正常由 update_verifier/framework 开机后调用）。此时 `--cancel`（错误 54）、`--reset_status`、强清 prefs、ctl.restart 全都解不开（重启后重进同一状态）。唯一解法：`service call android.hardware.boot.IBootControl/default 8`（markBootSuccessful，幂等）+ `update_engine_client --merge` 让收尾跑完，回 merge=none 的干净 IDLE 后才能提交新安装。推不动时补一次 `ctl.restart update_engine` 让它重排 cleanup（此时槽已 successful，会立即通过）。
 
 **因此**：安装脚本在 `sys.boot_completed!=1` 时不得停 com.bbk.updater / 杀引擎（它参与 markBootSuccessful 链路）；launch 前必须过 IDLE 闸（`ue_wait_idle`）；成功切槽/刷 LK 只能发生在引擎日志确认写入成功之后 —— 顺序反了（包被 741 拒收却去切槽+刷 lk）是变砖前提。
+
+## 在线更新（app/.../update/）
+
+### 代理节点远端可配 + HEAD 探测（2026-11-26）
+
+国内直连 GitHub 常不可达，检测与下载都走代理。两层配置：
+
+- **清单源（种子源，内置）**：`UpdateChecker.MANIFEST_URLS`，4 个源并发竞速。必须内置——mirrors 配置本身就在清单里，没有种子源就拉不到远端配置。
+- **下载镜像（远端可配）**：清单 `update/latest.json` 的 `mirrors` 数组，CI 在 `.github/workflows/release.yml` 的 `MIRRORS_JSON` 里写入。App 优先用清单里的列表，旧清单缺字段时回退 `DEFAULT_DOWNLOAD_MIRRORS`。
+
+**节点失效时怎么改**（不需要发版）：改 `release.yml` 的 `MIRRORS_JSON`，并手动改一次仓库里的 `update/latest.json` 的 `mirrors`——App 下次检查更新就会拿到新列表。下次发版 CI 会用 `MIRRORS_JSON` 覆盖清单。
+
+**下载前 HEAD 探测**：`probeFastestSource()` 对「直连 + 各镜像」并发发 HEAD，选最先返回 2xx 的源下载，避免国内直连必等 8s 连接超时。探测全失败时回退原有串行回退。注意 OkHttp 默认跟随重定向，直连的 302 会被跟到 CDN 的 200。
+
+**已验证节点**（2026-11-26 实测，清单拉取）：`gh-proxy.com` 1.5s、`jsDelivr` 3.2s、`ghfast.top` 3.8s 均 200。**`gh-proxy.org` 不可用**——连接超时，且裸域返回 `Web-Server: gh-proxy.com`，是同一服务的别名，不构成冗余，别加。
+
+### 清单里的 apk 字段必须是 GitHub 清洗后的真实资产名
+
+GitHub 上传资产会把括号清洗成点（`v0.4.8(92)` → `v0.4.8.92.`）。CI 用 `tr '()' '..'` 写入清洗后的名字；App 侧仍保留 `.replace("(", ".")` 兜底以兼容旧清单。这个坑复发过三次，改清单格式时注意。
 
 ## A/B 槽位切换（slot/swab.sh）
 
