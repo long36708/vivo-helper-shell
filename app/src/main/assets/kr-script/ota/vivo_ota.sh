@@ -63,6 +63,37 @@ if [ "$UE_LOG_WRITABLE" = "1" ]; then
   printf '%s%s%s\n' "$C_BLU" "[vivo_ota] $(date '+%F %T') 本次日志开始 (终端带颜色, 文件纯文本: $UE_MIRROR)" "$C_RST"
 fi
 
+# ---------- update_engine 原版二进制: 持久备份 / 真还原 (2026-11-27 P1) ----------
+# 旧实现两个坑:
+#   1) 原版备份放在 $TMP/update_engine.bak, 而 $TMP 每次运行开头 rm -rf -> 被 kill -9
+#      留下 patched 二进制时, 下次启动完全没有原版可还原;
+#   2) hexpatch 是直接改 $UE_BAK, 于是 UE_BAK 里其实是【已 patch】的版本,
+#      restore_system_certs 用 `cp "$UE_BAK" "$UE"` 等于把 patched 版再写回去, 根本没还原。
+# 现在: 原版备份放持久路径, 并用"二进制里是否含 patched 证书路径串"判定真实状态
+# (不靠可能过期的标记文件), 启动自愈 / EXIT trap / 证书回退 三处共用同一还原函数。
+UE_ORIG_BAK=/data/local/tmp/vivo_ota_update_engine.orig
+UE_PATCH_FLAG=/data/local/tmp/vivo_ota_update_engine.patched
+UE_PATCH_PATH='/data/fuck_oddo_ota_testcerts.zip'
+
+ue_is_patched() {
+  grep -aq "$UE_PATCH_PATH" /system/bin/update_engine 2>/dev/null
+}
+
+# 真还原: 只有二进制确实含 patch 串才动; 否则清掉可能过期的标记直接返回。
+# 成功后连备份一起删 —— 备份只在 patch 存活期间有意义, 留着会在"刷入新 ROM 后重启"
+# 时把旧版 update_engine 当成原版写回(新 ROM 的 UE 版本已变)。失败则保留备份供下次重试。
+# 返回 0=已还原或本就干净, 1=处于 patched 但还原失败(需人工介入)。
+ue_restore_original() {
+  ue_is_patched || { rm -f "$UE_PATCH_FLAG" 2>/dev/null; return 0; }
+  if [ -f "$UE_ORIG_BAK" ] && cp -f "$UE_ORIG_BAK" /system/bin/update_engine 2>/dev/null; then
+    rm -f "$UE_PATCH_FLAG" "$UE_ORIG_BAK" 2>/dev/null
+    log "  [cert] 已从持久备份还原 /system/bin/update_engine 原版"
+    return 0
+  fi
+  log "🚨 [cert] update_engine 处于 patched 状态但持久备份缺失/写入失败, 请手动恢复!"
+  return 1
+}
+
 # ---------- 安装单例锁 (原子 mkdir 锁, 防并发实例互相 pkill 打断安装) ----------
 # 借鉴 vivo_ota_status.sh 的单例锁思路, 但把"pid 文件 + kill -0"升级为 mkdir 原子锁。
 # 仅阻塞"真正发起安装"的入口(本脚本), 不影响 status/cancel 等只读/控制命令。
@@ -121,6 +152,9 @@ _cleanup_on_exit() {
   # OTA89_WRAPPER_ACTIVE 只可能由 ota89_install_wrapper 置 1, 用它判断函数是否已定义
   # (脚本在函数定义之前就 die 时不能调用未定义函数)。
   [ "$OTA89_WRAPPER_ACTIVE" = "1" ] && ota89_cleanup_wrapper
+  # 2026-11-27 P1: 被『退出』杀脚本 / die 时, 若 update_engine 还处于 patched 状态,
+  # 用持久备份真还原原版(ue_restore_original 定义在文件头部, 此时一定已定义)。
+  ue_restore_original
   _release_install_lock
 }
 trap '_cleanup_on_exit' EXIT
@@ -141,6 +175,10 @@ if pgrep -f 'update_engine --logtostderr' >/dev/null 2>&1; then
   pkill -9 -f 'update_engine --logtostderr' 2>/dev/null
   log "已杀掉上次残留的独立 update_engine 前台进程"
 fi
+# 3) 2026-11-27 P1 启动自愈: 上次被 kill -9 (EXIT trap 不执行) 留下 patched 的
+#    update_engine 时, 用持久备份还原。必须在证书绕过段(会重新 patch)之前、且在本实例
+#    已持锁之后执行, 避免与并发实例互相踩踏。
+ue_restore_original
 
 TMP=/data/local/tmp/vivo_ota
 rm -rf "$TMP"; mkdir -p "$TMP"
@@ -548,6 +586,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null; pwd)
 RES_TESTCERTS="$SCRIPT_DIR/res/testcerts.zip"
 [ -f "$RES_TESTCERTS" ] && TESTCERTS="$RES_TESTCERTS"
 UE=/system/bin/update_engine
+# UE_BAK 现仅作 patch 的工作副本(在 $TMP, 每次运行重建); 原版备份是持久的 UE_ORIG_BAK。
 UE_BAK="$TMP/update_engine.bak"
 SYS_OTACERTS_BACKUP="$TMP/otacerts.orig.zip"
 CERT_ACTIVE=0; CERT_BIND=0; UE_PATCHED=0
@@ -560,13 +599,21 @@ if [ "$4" = "1" ]; then
     cp -f "$TESTCERTS" /data/fuck_oddo_ota_testcerts.zip 2>/dev/null
     PATCHED_CERT_READY=0
     [ -f /data/fuck_oddo_ota_testcerts.zip ] && PATCHED_CERT_READY=1
-    cp -f "$UE" "$UE_BAK"
+    # 2026-11-27 P1: 持久备份原版。启动自愈已保证此刻 UE 是原版(未 patch);
+    # 只在备份不存在时写入, 绝不用 hexpatch 后的 UE_BAK 覆盖它。
+    if [ ! -f "$UE_ORIG_BAK" ]; then
+      cp -f "$UE" "$UE_ORIG_BAK" 2>/dev/null \
+        && log "  原版 update_engine 已持久备份 -> $UE_ORIG_BAK" \
+        || log "  ⚠ 持久备份失败, 后续将无法自动还原二进制"
+    fi
+    cp -f "$UE_ORIG_BAK" "$UE_BAK" 2>/dev/null || cp -f "$UE" "$UE_BAK"
     "$MAGISKBOOT" hexpatch "$UE_BAK" \
       2F73797374656D2F6574632F73656375726974792F6F746163657274732E7A6970 \
       2F646174612F6675636B5F6F64646F5F6F74615F7465737463657274732E7A6970
     # remount/cp 失败(erofs 只读, Android15 常见)时 hexpatch 不生效, 降级 bind
     if [ "$PATCHED_CERT_READY" -eq 1 ] && mount -o rw,remount /system 2>/dev/null && cp -f "$UE_BAK" "$UE"; then
-      log "  update_engine 证书路径已改为 /data/fuck_oddo_ota_testcerts.zip"
+      log "  update_engine 证书路径已改为 $UE_PATCH_PATH"
+      echo "patched at $(date '+%F %T') by vivo_ota.sh" > "$UE_PATCH_FLAG" 2>/dev/null
       UE_PATCHED=1; CERT_ACTIVE=1
     else
       log "  ⚠ hexpatch 未生效(/data 证书缺失或 /system 只读), 降级 mount --bind 覆盖 otacerts"
@@ -1238,12 +1285,10 @@ restore_system_certs() {
     fi
   fi
   if [ "$UE_PATCHED" = "1" ]; then
-    if cp -f "$UE_BAK" "$UE" 2>/dev/null; then
-      UE_PATCHED=0
-      log "  已还原 /system/bin/update_engine 原版二进制"
-    else
-      log "  ⚠ 还原 update_engine 失败(/system 只读?), 重试仍可能用 testcerts"
-    fi
+    # 2026-11-27 P1: 必须还原【原版】。旧实现 cp "$UE_BAK" "$UE" 里的 UE_BAK 是
+    # hexpatch 过的工作副本, 等于把 patched 版又写回去, 根本没有回退到系统证书。
+    ue_restore_original
+    UE_PATCHED=0
   fi
 }
 
