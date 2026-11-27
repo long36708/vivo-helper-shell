@@ -108,9 +108,34 @@ fi
 # 注意: update_engine_client 无 --status flag (真机实测报 unknown command line flag),
 #       状态只能从落盘日志 (/logdata/recovery/update_engine_log) 关键字判定。
 # (UE_LOG_DIR 由 ota_common.sh 定义)
-LAST_LOG=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+#
+# 2026-11-27 P0-4 会话锚定: 原先对整份日志取 `tail -1` 关键字, 上一次安装的
+# UPDATED_NEED_REBOOT/IDLE 终态会被当成"本次取消"的结果, 误导用户。现改为复用
+# vivo_ota.sh 在 launch 后持久化的锚点(日志文件+字节偏移, 存在安装锁目录), 只匹配
+# 本次会话之后新增的日志行 —— 语义与 vivo_ota.sh 的 new_log_grep 一致:
+#   同一文件 -> 从锚点偏移之后读; 日志已轮转 -> 新文件整份都是本次会话;
+#   无锚点(安装脚本未在跑) -> 不猜状态, 避免拿历史日志误报。
+STATE_RE='UPDATED_NEED_REBOOT|UPDATE_STATUS_IDLE|ActionProcessor: (suspending|resuming|finished)|Downloading|Verifying|Finalizing'
+ANCHOR_LOG=""; ANCHOR_OFF=0
+if [ -f "$INSTALL_LOCK_DIR/log_anchor" ]; then
+  ANCHOR_LOG=$(sed -n '1p' "$INSTALL_LOCK_DIR/log_anchor" 2>/dev/null)
+  ANCHOR_OFF=$(sed -n '2p' "$INSTALL_LOCK_DIR/log_anchor" 2>/dev/null)
+  case "$ANCHOR_OFF" in ''|*[!0-9]*) ANCHOR_OFF=0 ;; esac
+fi
+CUR_LOG=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
 STATE_HINT=""
-[ -n "$LAST_LOG" ] && STATE_HINT=$(grep -aoE 'UPDATED_NEED_REBOOT|UPDATE_STATUS_IDLE|ActionProcessor: (suspending|resuming|finished)|Downloading|Verifying|Finalizing' "$LAST_LOG" 2>/dev/null | tail -1)
+if [ -n "$CUR_LOG" ] && [ -n "$ANCHOR_LOG" ]; then
+  if [ "$CUR_LOG" = "$ANCHOR_LOG" ]; then
+    SZ=$(stat -c %s "$CUR_LOG" 2>/dev/null || echo 0)
+    if [ "$SZ" -gt "$ANCHOR_OFF" ] 2>/dev/null; then
+      STATE_HINT=$(tail -c +$((ANCHOR_OFF + 1)) "$CUR_LOG" 2>/dev/null \
+                   | grep -aoE "$STATE_RE" | tail -1)
+    fi
+  else
+    # 日志已轮转到新文件: 新文件整份都是本次会话
+    STATE_HINT=$(grep -aoE "$STATE_RE" "$CUR_LOG" 2>/dev/null | tail -1)
+  fi
+fi
 if echo "$STATE_HINT" | grep -q 'UPDATED_NEED_REBOOT'; then
   echo ""
   echo "⚠ 引擎日志显示 UPDATED_NEED_REBOOT: 本次取消前, 包可能已部分/全部写入目标槽。"

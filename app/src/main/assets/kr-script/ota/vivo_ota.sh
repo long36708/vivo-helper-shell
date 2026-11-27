@@ -16,10 +16,12 @@
 #   $8 = lk_img     : LK 镜像文件路径 (原 ${11})
 #
 # 环境变量(开关类, 不占位置参数, 由 ota.xml 的 <set> 注入):
-#   SPF=1           : 属性伪装(Spoof Properties)。在 headers 追加 4 项 vivo 系统属性
-#                       (RO_VIVO_PRODUCT_VERSION / RO_VIVO_SECURITY_PATCH / RO_VIVO_ANTI_VER /
-#                       RO_VIVO_DEVICE_NAME), 并 resetprop 写入, 绕过部分机型对"系统版本/
-#                       安全补丁/防回滚版本/机型名"的校验(此类校验失败会触发数据清空)。
+#   SPF=1           : 属性伪装(Spoof Properties)。在 headers 追加 5 项 vivo 系统属性
+#                       (ro.vivo.product.version / ro.build.version.security_patch /
+#                       ro.vendor.build.security_patch / ro.boot.anti.avb_anti_ver=0 /
+#                       ro.vivo.ota.arb=空), 并 resetprop 写入, 绕过部分机型对"系统版本/
+#                       双安全补丁/防回滚版本(ARB)"的校验(此类校验失败会触发数据清空)。
+#                       实际值见下文 SPF 段 (:499 附近), 与 dg_install.sh 一致。
 #   POWERWASH=1     : 刷完恢复出厂设置。在 headers 追加 POWERWASH=1, update_engine 应用
 #                       完成后自动触发 factory reset(清空用户数据分区)。危险操作, 默认关闭。
 #   (借鉴 vivo_dg_app-v1.0 的 dg_install.sh 的 $5 SPF / $6 POWERWASH 设计, 改为环境变量形态)
@@ -341,11 +343,10 @@ fi
 # 注意: 签名检测仅作信息提示。
 log "定位 payload.bin ..."
 PAYLOAD_FILE=""; PAYLOAD_OFFSET=""; PAYLOAD_SIZE=""; USE_OFFSET=0
-COMPILED=0
 # 双保险: strings 提取可打印串 或 grep -a 直接匹配, 任一命中即判编译包。
+# 注: 原 COMPILED 变量 (:344/:348) 设置后从未被读取, 已删; 此处仅作信息提示。
 if tail -c 65536 "$ROM" 2>/dev/null | strings 2>/dev/null | grep -q "signed by SignApk" 2>/dev/null \
    || tail -c 65536 "$ROM" 2>/dev/null | grep -a -q "signed by SignApk" 2>/dev/null; then
-  COMPILED=1
   log "  检测: 编译/官方包 (signed by SignApk)"
 else
   log "  检测: 非编译包"
@@ -632,16 +633,41 @@ log "当前 slot=$CUR_SLOT 目标 slot=$TARGET_SLOT"
 #      以及作为防御性兜底, 确保任何拉起 update_engine 的路径都以 cwd=/ 运行。
 TOOL_DIR=/data/user/0/com.wellqrg.gt/files
 TOOL_UE="$TOOL_DIR/update_engine"
+# 2026-11-27 P0 修复: 原二进制备份到【持久目录】, 不能用 $TMP(每次运行开头 rm -rf)。
+# 解决"覆盖第三方二进制后 cleanup 只 rm -f、日志却谎称已恢复"的问题:
+#   - 覆盖前先 cp 原文件到 OTA89_BAK;
+#   - cleanup / EXIT trap 用备份真还原;
+#   - 上次被 kill -9(EXIT trap 不执行)残留的包装器, 下次启动由 recover 自愈。
+OTA89_BAK=/data/local/tmp/vivo_ota_ota89_update_engine.bak
 OTA89_WRAPPER_ACTIVE=0
 
+# 自愈: 若上次运行被 kill -9 留下包装器和备份, 先还原原二进制。
+# 备份存在即说明我们曾覆盖过(备份只在覆盖前那一刻创建), 无条件还原是安全的。
+ota89_recover_stale() {
+  [ -f "$OTA89_BAK" ] || return 0
+  if cp -f "$OTA89_BAK" "$TOOL_UE" 2>/dev/null; then
+    chmod 755 "$TOOL_UE" 2>/dev/null
+    log "  [ota89] 已用备份还原上次残留的工具目录 update_engine 原二进制"
+  else
+    log "  [ota89] ⚠ 还原上次残留包装器失败, 请手动从 $OTA89_BAK 恢复"
+  fi
+  rm -f "$OTA89_BAK" 2>/dev/null
+}
+
 # 预置包装器: 若工具目录存在且其中的 update_engine 副本是被覆盖的二进制(>1MB),
-# 则替换为 "强制 cd / 再 exec 系统原版" 的 shell 包装器。
+# 先备份原文件, 再替换为 "强制 cd / 再 exec 系统原版" 的 shell 包装器。
 ota89_install_wrapper() {
   [ -d "$TOOL_DIR" ] || return 0
+  ota89_recover_stale
   if [ -f "$TOOL_UE" ]; then
     local sz=0
     sz=$(stat -c %s "$TOOL_UE" 2>/dev/null || echo 0)
     if [ "$sz" -gt 1000000 ] 2>/dev/null; then
+      # 备份必须在覆盖前成功; 备份失败则放弃改写, 绝不覆盖后无法还原。
+      if ! cp -f "$TOOL_UE" "$OTA89_BAK" 2>/dev/null; then
+        log "  [ota89] ⚠ 备份原二进制失败, 放弃改写包装器(避免覆盖后无法还原)"
+        return 0
+      fi
       cat > "$TOOL_UE" <<'EOF'
 #!/system/bin/sh
 # vivo_ota ota89 fix wrapper (非守护版): 强制正确 cwd, 再 exec 系统原版 update_engine
@@ -650,17 +676,23 @@ exec /system/bin/update_engine "$@"
 EOF
       chmod 755 "$TOOL_UE" 2>/dev/null
       OTA89_WRAPPER_ACTIVE=1
-      log "  [ota89] 工具目录 update_engine 副本(>$sz bytes)已被覆盖为二进制, 已改写为 cwd=/ 包装器"
+      log "  [ota89] 工具目录 update_engine 副本($sz bytes)已备份到 $OTA89_BAK 并改写为 cwd=/ 包装器"
     fi
   fi
 }
 
-# 清理包装器: 安装结束后移除, 避免长期驻留影响工具正常使用。
+# 清理包装器: 安装结束后用备份真还原原二进制, 避免长期驻留/丢失第三方工具文件。
 ota89_cleanup_wrapper() {
   [ "$OTA89_WRAPPER_ACTIVE" = "1" ] || return 0
-  rm -f "$TOOL_UE" 2>/dev/null
+  if [ -f "$OTA89_BAK" ] && cp -f "$OTA89_BAK" "$TOOL_UE" 2>/dev/null; then
+    chmod 755 "$TOOL_UE" 2>/dev/null
+    log "  [ota89] 已从备份还原工具目录 update_engine 原始二进制"
+  else
+    rm -f "$TOOL_UE" 2>/dev/null
+    log "  [ota89] ⚠ 备份缺失或还原失败, 只能移除包装器(原二进制可能已丢失)"
+  fi
+  rm -f "$OTA89_BAK" 2>/dev/null
   OTA89_WRAPPER_ACTIVE=0
-  log "  [ota89] 已移除临时包装器, 恢复工具目录 update_engine 原始状态"
 }
 
 # ---------- 7. 执行安装 (用系统服务, 绝不复制二进制) ----------
@@ -692,11 +724,11 @@ run_client() {
   if [ "$UE_RC" -ne 0 ]; then
     # 2026-09-06 复盘修复: 客户端退出码 248 = binder Status(-8) 失败(如错误54/65
     # "Already processing"/"CleanupPreviousUpdateAction is running"), 并不是
-    # UPDATED_NEED_REBOOT! 旧代码直接 return $UE_RC, 248 不在 FAIL_CODES 里被一路
-    # 当"已应用待重启成功"放行 -> 包根本没写入就去刷 LK/切槽(变砖前提)。
+    # UPDATED_NEED_REBOOT! 旧代码直接 return $UE_RC, 248 曾被当成成功放行 ->
+    # 包根本没写入就去刷 LK/切槽(变砖前提)。所有非 0 launch 一律归一为失败码 66。
     # 引擎真正接受安装时 launch 退出 0; 成功终态一律由 wait_engine_done 从引擎日志判定。
     log "  ✗ launch 失败 (RC=$UE_RC), 引擎未接受本次更新 (客户端非0退出码≠UPDATED_NEED_REBOOT)"
-    # attempt_install 以 RC=$UE_RC 取结果, 须同步改写 UE_RC (66 已列入 FAIL_CODES)
+    # attempt_install 以 RC=$UE_RC 取结果, 须同步改写 UE_RC (66 属失败码, 不在 SUCCESS_CODES)
     UE_RC=66
     return 66
   fi
@@ -730,6 +762,12 @@ record_log_anchor() {
   f=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
   UE_ANCHOR_FILE="$f"; UE_ANCHOR_OFF=0
   [ -n "$f" ] && UE_ANCHOR_OFF=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  # 2026-11-27 P0-4: 把锚点(日志文件+字节偏移)持久化到安装锁目录, 供并行的
+  # 『取消当前安装』(vivo_ota_cancel.sh) 只读本次 launch 之后新增的日志 ——
+  # 它原先 `tail -1` 整份日志, 上一次安装的 UPDATED_NEED_REBOOT/IDLE 终态会
+  # 被误当成"本次取消"的结果。锁释放时随目录一起清除。
+  [ -d "$INSTALL_LOCK_DIR" ] && \
+    printf '%s\n%s\n' "$UE_ANCHOR_FILE" "$UE_ANCHOR_OFF" > "$INSTALL_LOCK_DIR/log_anchor" 2>/dev/null
   # 快照已有失败归档, 只把本次新增的当失败依据 (避免旧归档误判)
   WAIT_ERR_SEEN=""
   for _ef in "$UE_ERR_DIR"/*; do
@@ -838,7 +876,7 @@ wait_engine_done() {
 # 重要: 清状态目录只删元数据(prefs/进度), 不会动已写进目标 slot 分区的镜像数据。
 # 但为安全起见, 默认绝不主动清状态 —— 因为处于 UPDATED_NEED_REBOOT 往往意味着"上一次刷的包
 # 已应用、正等重启生效", 此时应让用户去重启使其生效, 而不是清掉状态重刷(否则旧包可能白刷)。
-# 仅当用户明确传 FORCE=1 (环境变量) 或第7参数(force)=1 时, 才允许清状态强制重刷。
+# 仅当用户明确传 FORCE=1 (环境变量) 或第6参数(force)=1 时, 才允许清状态强制重刷。
 clear_ue_state() {
   # 安全闸 (2026-09-06 复盘): 引擎持有待合并快照(merge status≠none)时, 删 prefs 会
   # 破坏 VAB 收尾, 且清完重启引擎只会重进 CleanupPreviousUpdateAction 卡死。
@@ -1008,21 +1046,30 @@ ue_hal_service() {
 # "干净" 与 "查询失败", 不能把"查不到"当成"干净"(AGENTS 已记录过这次误判的教训)。
 ue_hal_merge_status() {
   ue_hal_service || return 1
-  local out raw ms
+  local out raw tok ms
   out=$(service call "$UE_HAL_SVC" 4 2>/dev/null)
   raw=$(printf '%s' "$out" | sed -n 's/.*Result: *//p')
   [ -n "$raw" ] || return 1
-  ms=$(printf '%s' "$raw" | grep -oE '0x[0-9a-fA-F]+|[0-9a-fA-F]{8}|[0-9]+' | head -1 | sed 's/^0*//')
-  [ -n "$ms" ] || ms=0
+  # 2026-11-27 P0 修复: 必须先确认 raw 里真有数值 token, 再把前导 0 剥掉。
+  # 旧实现直接 `grep ... | sed 's/^0*//'` 后 `[ -n "$ms" ] || ms=0`, 于是
+  # "Result: (null)" 这类解析不出数值的输出被兜底成 0=干净 —— 调用方无从区分
+  # "查不到"与"真干净"(AGENTS.md 已记录过这次误判)。
+  tok=$(printf '%s' "$raw" | grep -oE '0x[0-9a-fA-F]+|[0-9a-fA-F]{8}|[0-9]+' | head -1)
+  [ -n "$tok" ] || return 1
+  ms=$(printf '%s' "$tok" | sed 's/^0*//')
+  [ -n "$ms" ] || ms=0   # tok="0" 剥完为空, 归一回 0
   printf '%s\n' "$ms"
 }
 
-# 宽松判定: 0=干净。无 HAL 或查询失败时按"干净"放行(由 idle-gate 的日志/进程判据兜底),
-# 保持既有主流程行为不变; 需要严格三态的地方用 ue_hal_merge_status。
+# 三态判定 (2026-11-27 P0 修复): 0=确认干净, 1=未就绪/未知(拒绝放行)。
+# 无 HAL(非 A/B)仍视为干净 —— 这类设备没有 VAB 快照概念, 保持既有主流程。
+# 但 HAL 服务存在、查询失败/解析不出数值时绝不能当干净: 旧实现 `|| return 0`
+# 会把"查不到"伪装成"干净", 让 IDLE 闸形同虚设(与 2026-09-13 "HAL 查不到当干净"
+# 同类误判), 带状态硬提交只会被 741 拒收。与 cancel.sh 的 OTA_HAL_STRICT 对齐。
 ue_merge_status_none() {
   local ms
   ue_hal_service || return 0   # 无 HAL(非 A/B) 视为干净
-  ms=$(ue_hal_merge_status) || return 0
+  ms=$(ue_hal_merge_status) || return 1
   [ "$ms" = "0" ]
 }
 
@@ -1178,6 +1225,17 @@ restore_system_certs() {
     umount /system/etc/security/otacerts.zip 2>/dev/null
     CERT_BIND=0
     log "  已卸载 otacerts.zip 的 bind 挂载"
+    # 2026-11-27 P0 修复: bind 之前备份过系统原版证书(:573/:584), 但旧实现
+    # 只 umount、从不把备份 cp 回去 —— 若 bind 期间有写入穿透到原文件, 系统证书
+    # 会残留被改动的内容。这里显式还原; /system 只读(erofs)时 cp 失败不致命,
+    # 因为 umount 后原文件本就重新可见, 仅作防御性回写。
+    if [ -f "$SYS_OTACERTS_BACKUP" ]; then
+      if cp -f "$SYS_OTACERTS_BACKUP" /system/etc/security/otacerts.zip 2>/dev/null; then
+        log "  已从备份还原系统 /system/etc/security/otacerts.zip 原版"
+      else
+        log "  ⚠ 回写 otacerts.zip 备份失败(/system 只读?), bind 已卸载, 原文件应仍可见"
+      fi
+    fi
   fi
   if [ "$UE_PATCHED" = "1" ]; then
     if cp -f "$UE_BAK" "$UE" 2>/dev/null; then
@@ -1195,7 +1253,7 @@ restore_system_certs() {
 #   脚本一死, 后面的切槽 / 刷 LK / 安装小结全都不会执行; 此时若重启, update_engine 会
 #   Removing all update state 把刚写入的目标槽回滚清空(update-result 变 1) —— 等于白刷。
 #   『隐藏』按钮只收起界面、不杀进程, 安装继续; 故提示必须把两者区别讲清楚。
-log "⚠ 安装进行中, 预计约 4 分钟, 请勿退出安装界面"
+log "⚠ 安装进行中, 视包大小可能耗时数分钟到约 30 分钟(等待上限 1800s), 请勿退出安装界面"
 log "  点『退出』= 终止本脚本 -> 切槽 / 刷 LK / 小结都不会执行, 重启时引擎会回滚清空刚写入的槽"
 log "  点『隐藏』= 仅收起界面, 脚本与安装继续 (之后可用『查看安装进度』回看)"
 
@@ -1206,23 +1264,30 @@ RC=$?
 # 安装结束(无论成败)清理临时包装器, 避免影响工具目录原有二进制
 ota89_cleanup_wrapper
 
-# 失败判定策略: 只有明确列入 FAIL_CODES 的错误码才视为失败, 其余一律当成功。
-# 业务错误码语义: 10=签名/证书校验失败, 15=rootfs验证失败, 89/92=状态机/slot冲突,
-# 66=launch 被拒/引擎未接受(含旧逻辑误判成"成功"的客户端 RC=248, 见 run_client),
-# 99=引擎写出失败归档但错误码不可解析的未知失败(不再兜底成 10, 以免触发无谓的证书回退)。
-# 其他(含 1、248=引擎日志确认的已应用等重启、以及任何未知值)都按正常处理, 不再误杀。
-FAIL_CODES="4 9 10 15 66 89 92 99"
-is_fail_code() {
+# 失败判定策略 (2026-11-27 P0 修复): 改为「已知成功码白名单」。
+# 旧实现是失败码黑名单 FAIL_CODES="4 9 10 15 66 89 92 99" —— 21/42 这类
+# code_to_text 认得、失败归档解析(view :767)也会返回的码因不在黑名单里, 被当成
+# 成功一路走到切槽+刷 LK。新增错误码时黑名单会反复漏, 故反转:
+#   成功仅 SUCCESS_CODES="0 1 248" (0/1=写入成功, 248=UPDATED_NEED_REBOOT 待重启);
+#   124 = 等待超时、状态未知, 既非成功也非明确失败, 由段7/段9单独拦截(不切槽/不重启);
+#   其余一切(含 21/42 及任何未知码)按失败处理, 并在下方 case 的 * 分支 die。
+SUCCESS_CODES="0 1 248"
+is_success_code() {
   local c="$1" f
-  for f in $FAIL_CODES; do
+  for f in $SUCCESS_CODES; do
     [ "$c" = "$f" ] && return 0
   done
   return 1
 }
+is_fail_code() {
+  [ "$1" = "124" ] && return 1
+  ! is_success_code "$1"
+}
 
 # 错误码 -> 人类可读含义 (借鉴 Custota 的 UpdateEngineError/UpdateEngineStatus 枚举表思路)
 # 覆盖 vivo update_engine 常见返回码; 未知码回退为"未知/需查 logcat"。
-# 注意: 0/1 视为成功, 248=UPDATED_NEED_REBOOT 视为成功(待重启), 这些不进 FAIL_CODES。
+# 注意: 0/1 视为成功, 248=UPDATED_NEED_REBOOT 视为成功(待重启), 这些在 SUCCESS_CODES 里;
+# 124=等待超时状态未知, 不进成功也不进失败 case, 由段7/段9单独拦截。
 code_to_text() {
   case "$1" in
     0)   echo "成功 (SUCCESS)" ;;
@@ -1257,9 +1322,14 @@ if [ "$RC" = "10" ] && [ "$CERT_ACTIVE" = "1" ]; then
   log "回退系统证书后重试返回 RC=$RC"
 fi
 
-# 失败收尾: 仅 FAIL_CODES 中的错误码才视为失败, 其余一律按正常继续
+# 失败收尾: 除 SUCCESS_CODES(0/1/248) 与 124(状态未知)外一律按失败中止, 绝不带着
+# 未确认的 RC 继续切槽/刷 LK。case 末尾必须有 * 兜底, 否则新增错误码仍会穿透。
 if is_fail_code "$RC"; then
   case "$RC" in
+    21)
+      die "update_engine 返回 21 (payload 元数据大小校验失败, headers 解析异常, 详见 update_engine_log)" ;;
+    42)
+      die "update_engine 返回 42 (payload 哈希/大小校验失败, 包损坏或机型不匹配, 详见 update_engine_log)" ;;
     15)
       # kNewRootfsVerificationError: payload 已写入目标 slot, 但新 rootfs 验证失败。
       # 最常见原因: 包机型与设备不符(如 PD2415 包刷 PD2419), 附加载荷(oem/vgc/modem)校验对不上;
@@ -1288,6 +1358,9 @@ if is_fail_code "$RC"; then
       ;;
     89|92)
       die "update_engine_client 返回 $RC (状态机/ slot 冲突, 通常需重启设备后再试)"
+      ;;
+    *)
+      die "update_engine_client 返回未识别的失败码 $RC ($(code_to_text "$RC")), 已中止后续切槽/刷 LK"
       ;;
   esac
 fi
@@ -1432,17 +1505,17 @@ fi
 # 位置: 本段已从"ROOT 之后/切槽之前"移到"手动切启动槽之后"。原因: 刷 bootloader 必须在
 #   切槽动作之后进行 —— 切槽是否生效至少要出现在日志里
 #   (AGENTS.md: 顺序反了是变砖前提)。
-#   注(2026-09-11): 原先"切槽被拒就跳过 LK / 写入未成功就跳过 LK"的门控已按需求"全拆",
-#   现在只要勾选就刷; 本段保留在切槽之后, 只为日志顺序正确 + 三处醒目提示。
+#   2026-11-27 P0 安全修复: 撤销 2026-09-11 的"全拆", 恢复"写入未确认就不刷 LK"硬闸 ——
+#   超时(124)/状态未知时仍刷 LK 会留下"LK 是新版、系统还是旧版"的变砖前提。
 # 参数 (ROOT 三项移除后前移 3 位):
 #   $7  = lk 开关 (1=开启)
 #   $8  = 用户选定的 lk 镜像文件路径
 #   环境变量 LK_IMG / LK_DEV 可单独覆盖(LK_DEV 为精确设备节点, 跳过自动推断)
 # 注意: 多数 vivo 机型 lk 为独立(非 A/B)分区, 无 slot 后缀; 若机型为 lk_a/lk_b 可设 LK_DEV 精确指定。
 #
-# 两重闸门 (刷 bootloader 是变砖高危操作; 原"三重"中的①门控已按需求全拆):
-#   ① 门控[已拆]: 不再要求 RC=0/1/248、也不再要求切槽结果已确认 —— 勾选即刷。
-#      拆掉后必须在刷前/刷后/小结三处提示"LK 写入 ≠ 刷机包已刷入"。
+# 三重闸门 (刷 bootloader 是变砖高危操作):
+#   ① 硬闸[2026-11-27 恢复]: 必须 INSTALL_WRITTEN=1(写入已确认成功) 才允许刷 LK;
+#      超时/状态未知/失败 RC 一律 die, 不进 dd。撤销此前"勾选即刷"的全拆行为。
 #   ② 可写: 写前 blockdev --setrw 解除只读/写保护, 否则 dd 直接 Permission denied 失败。
 #   ③ size: 镜像 > 分区 -> die(会被截断, 必坏); 镜像 < 分区 -> 告警后继续(LK 头部自带
 #      长度, 分区尾部残留旧数据通常不影响启动, 与 fastboot flash 行为一致)。
@@ -1454,17 +1527,19 @@ LK_ENABLED=0
 LK_IMG="${LK_IMG:-${8}}"
 
 if [ "$LK_ENABLED" = "1" ]; then
-  # ── LK 门控已按需求"全拆" (2026-09-11) ──
-  # 只要勾选『刷入 LK』就刷, 不再受 RC(写入结果) / 切槽结果约束 —— 用户主动选的镜像照刷。
-  # 仍保留的硬闸门: 镜像存在 + 分区探测 + 解除只读 + 大小校验 + dd + 回读校验(见下)。
-  # 代价(已与需求确认): OTA 写入未被确认时也会刷 LK, 故刷前 / 回读通过后 / 小结
-  # 三处都要重申"LK 写入分区 ≠ 刷机包已刷入", 避免把 LK 回读校验通过当成刷机成功。
+  # ── 闸门①[硬闸, 2026-11-27 恢复]: 写入未确认就绝不刷 LK ──
+  # 原"全拆"(2026-09-11)允许在 RC=124/失败码下也刷 LK, 但那会留下"LK 新、系统旧"
+  # 的变砖前提(引擎随后回滚清空目标槽)。INSTALL_WRITTEN 仅在 RC=0/1/248 时置 1,
+  # 超时(124)与任何失败码都会到这里 die, 不进 dd。
+  if [ "$INSTALL_WRITTEN" != "1" ]; then
+    die "本次 OTA 写入未确认成功 (RC=$RC, INSTALL_WRITTEN=$INSTALL_WRITTEN), 已拒绝刷入 LK。请先用『查看安装进度』确认写入成功, 再单独刷 LK。"
+  fi
+  # 切槽指令已下发但未经回读校验(SLOT_PENDING=1)属 B 方案常态, 不阻断刷 LK ——
+  # LK 始终写入 lk$TARGET_SLOT(非当前运行侧), 不会因未回读而刷到运行槽。
+  # 刷前 / 回读通过后 / 小结三处仍重申"LK 写入分区 ≠ 刷机包已刷入"。
   log "⚠ 即将刷入 LK: LK 写入分区不等于刷机包已刷入"
   if [ "$SLOT_PENDING" = "1" ]; then
-    log "⚠ 本次切槽结果未经校验(需你自行查看槽位状态确认), 按需求仍继续刷 LK: 请勿把 LK 写入当作刷机包已刷入"
-  fi
-  if [ "$INSTALL_WRITTEN" != "1" ]; then
-    log "⚠ 本次 OTA 写入未确认成功(RC=$RC), 按需求仍继续刷 LK"
+    log "⚠ 本次切槽结果未经校验(需你自行查看槽位状态确认), LK 仍写入目标槽: 请勿把 LK 写入当作刷机包已刷入"
   fi
   [ -n "$LK_IMG" ] || die "开启'刷入 LK'后必须指定 lk 镜像文件路径 (第8参数 / LK_IMG)"
   [ -f "$LK_IMG" ] || die "指定的 LK 镜像不存在: $LK_IMG"
@@ -1520,7 +1595,10 @@ if [ "$LK_ENABLED" = "1" ]; then
 
   log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"
   log "  镜像: $LK_IMG"
-  log "  ⚠ ARB 防回滚熔丝不受本脚本控制: 镜像 anti_ver 低于设备当前值会导致拒启动(硬砖)"
+  log "🚨🚨🚨 高危确认: ARB 防回滚熔丝不受本脚本控制 🚨🚨🚨"
+  log "  刷入 anti_ver 低于设备当前熔丝值的 LK 会触发防回滚 -> 拒启动(硬砖),"
+  log "  且本脚本全程检测不到。务必先确认镜像 anti_ver 不低于设备当前值再刷!"
+  log "  (SPF 只能清系统侧 ro.boot.anti.avb_anti_ver, 清不掉 bootloader 自身熔丝)"
   # dd 的输出(records in/out、bytes copied)是"到底写了多少字节"的唯一直接证据,
   # 但它是裸 stdout/stderr、不经过 log(), 原先只进终端不进 ota.log —— 这里捕获后经
   # log() 输出并转成单行, 保证刷 LK 这一步在 ota.log 里也能完整还原。
