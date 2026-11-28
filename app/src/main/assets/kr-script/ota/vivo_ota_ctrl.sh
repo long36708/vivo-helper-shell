@@ -25,22 +25,14 @@ CLIENT=/system/bin/update_engine_client
 ARG="$1"; shift
 [ -x "$CLIENT" ] || { echo "FAILED: 找不到 $CLIENT"; exit 1; }
 
-put() { printf '%b\n' "$*"; }
+# put() / color_stream() / last_hit_line() / log_lines() / detect_engine_state() 已收拢
+# 到 ota_common.sh (2026-11-27 P2-10/12)。本脚本原先覆写了 color_stream 用裸 '\033'
+# 字面量(违反共用库约定"颜色码由 printf 生成")且该覆写从未被调用, 已删除。
 
-# 本脚本的输出主要是命令回显, 不做逐行关键字着色(共用库的 paint_line 需要前置颜色
-# 变量, 这里只保留 put 的简单回显), 只对引擎日志用 sed 做行内高亮。
-color_stream() { sed -E \
-  -e "s/(ERROR|error|Failed|failed|FAIL)/$(printf '\033[31m')&$(printf '\033[0m')/g" \
-  -e "s/(suspending|resuming|UPDATED_NEED_REBOOT|overall progress|progress)/$(printf '\033[36m')&$(printf '\033[0m')/g" ; }
-
-# 日志判定工具: 最后一次命中的行号 / 文件行数 / 只看新增内容的 grep。
+# 日志判定: 只看本次调用之后新增的内容 (否则上一次同类事件的关键字会误报成功)。
 # 为什么不能"整文件 grep 终态关键字": 引擎启动阶段的清理会话、上一次安装结束都会在同一份
 # 日志里留下终态行, 命中即返回会把"正在安装"误判成"空闲"(vivo_ota.sh 为此加了
 # record_log_anchor 只看锚点之后的新内容, 是同一个坑)。
-UE_TERMINAL_PAT='UPDATE_STATUS_IDLE|UPDATED_NEED_REBOOT|Boot completed, waiting on markBootSuccessful'
-UE_ACTIVE_PAT='Downloading|Applying|Verifying|Finalizing|postinstall|overall progress|Completed .* operations'
-last_hit_line() { grep -anE "$1" "$2" 2>/dev/null | tail -1 | cut -d: -f1; }
-log_lines() { [ -n "$1" ] && [ -f "$1" ] || { echo 0; return; }; wc -l < "$1" 2>/dev/null || echo 0; }
 
 # 判"本次指令"是否被引擎写进日志: $1=指令前的最新日志, $2=指令前的行数, $3=关键字。
 # 只看本次调用之后新增的内容 —— 否则上一次同类事件留下的关键字会误报成功。
@@ -54,21 +46,15 @@ new_log_has() {
   fi
 }
 
-# 引擎当前是否在"进行中"(正在下载/校验/写入/清理)。
-# 判定依据(无 --status, 真机实测):
-#   1) update_engine 进程在跑
-#   2) 最新日志里最后一条"活动标记"晚于最后一条"终态标记"(无终态标记时视为进行中,
-#      与旧行为一致: 只有终态在最后才判空闲)。
+# 引擎当前是否在"进行中"(下载/校验/写入/清理/暂停)。
+# 2026-11-27 P2-12: 不再自备一套 UE_TERMINAL_PAT/UE_ACTIVE_PAT 判定, 直接复用
+# ota_common.sh 的统一状态机 detect_engine_state(), 避免在两份脚本里各修一次阈值。
 ue_is_active() {
-  pgrep -x update_engine >/dev/null 2>&1 || return 1
-  L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
-  [ -n "$L" ] || return 0   # 有进程但无日志, 视为进行中
-  T_LINE=$(last_hit_line "$UE_TERMINAL_PAT" "$L")
-  A_LINE=$(last_hit_line "$UE_ACTIVE_PAT" "$L")
-  [ -z "$T_LINE" ] && return 0                     # 无终态行 -> 进行中
-  [ -z "$A_LINE" ] && return 1                     # 有终态行且全程无活动 -> 不在进行中
-  [ "$A_LINE" -gt "$T_LINE" ] 2>/dev/null && return 0  # 活动在终态之后 -> 进行中
-  return 1                                         # 终态在最后 -> 不在进行中
+  detect_engine_state
+  case "$UE_STATE" in
+    UPDATING|SUSPENDED|CLEANUP) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 case "$ARG" in
@@ -151,7 +137,7 @@ case "$ARG" in
     # 降级维度提醒
     POST_TS=$(printf '%s\n' "$META" | grep -m1 '^post-timestamp=' | cut -d= -f2)
     CUR_TS=$(getprop ro.build.date.utc 2>/dev/null)
-    if [ -n "$POST_TS" ] && [ -n "$CUR_TS" ] && [ "$POST_TS" -lt "$CUR_TS" ] 2>/dev/null; then
+    if is_uint "$POST_TS" && is_uint "$CUR_TS" && [ "$POST_TS" -lt "$CUR_TS" ]; then
       put "  ${C_YEL}⚠ post-timestamp 早于当前, 属降级刷机, 需开启降级模式(第2参数=1)${C_RST}"
     fi
     put "${C_BLU}==== 预检结束: 以上仅结构/环境预判, 最终以 update_engine 实际校验为准 ====${C_RST}"

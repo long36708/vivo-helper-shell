@@ -104,8 +104,7 @@ ue_restore_original() {
 #   引擎写出失败归档 -> 被误判成错误码 10 -> 假失败 (见 ota.log 2026-09-21 复盘)。
 # 现改为 mkdir 原子锁 (mkdir 对同一路径并发只会有一个成功), 且存活判定只用 kill -0,
 # 绝不再用 "引擎是否忙" 作为兄弟实例存活与否的依据。
-INSTALL_LOCK_DIR=/data/local/tmp/vivo_ota_install.lock
-INSTALL_LOCK_PID="$INSTALL_LOCK_DIR/pid"
+# 锁路径常量 INSTALL_LOCK_DIR / INSTALL_LOCK_PID 已收拢到 ota_common.sh (P2-10)。
 _acquire_install_lock() {
   # 首次尝试原子创建锁目录
   if mkdir "$INSTALL_LOCK_DIR" 2>/dev/null; then
@@ -203,9 +202,10 @@ TESTCERTS=/data/fuck_oddo_ota_testcerts.zip
 # 此处曾重复定义为裸 echo 版本, 会覆盖前面的实现, 导致从这一行往后的所有日志
 # 既没有颜色、也不再写入镜像文件。故删除重复定义, 统一复用头部版本。
 
-# 小端读取 zip 本地头中的 2/4 字节整型
-le2() { local f="$1" o="$2" b; b=$(dd if="$f" bs=1 skip="$o" count=2 2>/dev/null | od -A n -t u1 | tr -s ' '); set -- $b; echo $(( ${1:-0} + ${2:-0}*256 )); }
-le4() { local f="$1" o="$2" b; b=$(dd if="$f" bs=1 skip="$o" count=4 2>/dev/null | od -A n -t u1 | tr -s ' '); set -- $b; echo $(( ${1:-0} + ${2:-0}*256 + ${3:-0}*65536 + ${4:-0}*16777216 )); }
+# 小端读取 zip 本地头中的 2/4 字节整型 (P2-11: 改用共用库 od_bytes 批量读,
+# 不再 dd bs=1 逐字节 syscall; od -j/-N 不可用时 od_bytes 内部回退 dd)。
+le2() { local f="$1" o="$2" b; b=$(od_bytes "$f" "$o" 2); set -- $b; echo $(( ${1:-0} + ${2:-0}*256 )); }
+le4() { local f="$1" o="$2" b; b=$(od_bytes "$f" "$o" 4); set -- $b; echo $(( ${1:-0} + ${2:-0}*256 + ${3:-0}*65536 + ${4:-0}*16777216 )); }
 
 # 从 zip 本地文件头解析 payload.bin 的偏移/大小 (仅支持 Stored 条目)。
 # 成功: 设置 PAYLOAD_FILE/PAYLOAD_OFFSET/PAYLOAD_SIZE/USE_OFFSET 并返回 0
@@ -216,7 +216,7 @@ locate_payload_in_zip() {
   [ -z "$hits" ] && { log "  ⚠ zip 内未找到 payload.bin 文件名, 回退整包解压"; return 1; }
   for spos in $(echo "$hits" | cut -d: -f1); do
     s=$spos; [ "$s" -gt 80 ] && s=$((spos-80)) || s=0
-    blob=$(dd if="$z" bs=1 skip="$s" count=$((spos - s)) 2>/dev/null | od -A n -t u1 | tr -s ' ')
+    blob=$(od_bytes "$z" "$s" $((spos - s)))
     set -- $blob
     local i=1 found=""
     while [ $# -gt 0 ]; do
@@ -321,8 +321,14 @@ unzip -p "$ROM" "META-INF/com/android/metadata" > "$META" 2>/dev/null \
 DEVICE=$(grep -m1 '^pre-device=' "$META" | cut -d= -f2)
 HW_DEVICE=$(grep -m1 '^hardware-device=' "$META" | cut -d= -f2)
 CUR_DEVICE=$(getprop ro.product.device 2>/dev/null)
-[ -n "$HW_DEVICE" ] && ! echo "$HW_DEVICE" | grep -qw "$CUR_DEVICE" \
-  && log "⚠ hardware-device($HW_DEVICE) 不含当前($CUR_DEVICE), 跨机型风险"
+# P2-11: 原 `grep -qw "$CUR_DEVICE"` 把设备串当正则(-w 的边界由正则引擎判), 设备名含
+# `.`/`+` 等元字符时会误配。改为固定串匹配: 用逗号分隔后 grep -qF 精确匹配整段。
+if [ -n "$HW_DEVICE" ] && [ -n "$CUR_DEVICE" ]; then
+  case ",$(printf '%s' "$HW_DEVICE" | tr ' ' ',')," in
+    *",$CUR_DEVICE,"*) : ;;
+    *) log "⚠ hardware-device($HW_DEVICE) 不含当前($CUR_DEVICE), 跨机型风险" ;;
+  esac
+fi
 [ -n "$DEVICE" ] && [ -n "$CUR_DEVICE" ] && [ "$DEVICE" != "$CUR_DEVICE" ] \
   && log "⚠ pre-device=$DEVICE 当前=$CUR_DEVICE (vivo 多代号, 谨慎)"
 
@@ -340,8 +346,9 @@ if [ "$2" != "1" ]; then
       log "⚠ 安全补丁级别: 包=$POST_PATCH < 设备当前=$CUR_PATCH (非降级模式, 疑似刷更旧系统, 请确认)"
     fi
   fi
-  if [ -n "$POST_TS" ] && [ -n "$CUR_TS" ]; then
-    if [ "$POST_TS" -lt "$CUR_TS" ] 2>/dev/null; then
+  # P2-11: 比较前先确认两边都是纯数字, 避免 -lt 拿到空串/非数字时行为不确定
+  if is_uint "$POST_TS" && is_uint "$CUR_TS"; then
+    if [ "$POST_TS" -lt "$CUR_TS" ]; then
       log "⚠ 构建时间戳: 包=$POST_TS < 设备当前=$CUR_TS (非降级模式, 疑似刷更旧系统, 请确认)"
     fi
   fi
@@ -606,12 +613,30 @@ if [ "$4" = "1" ]; then
         && log "  原版 update_engine 已持久备份 -> $UE_ORIG_BAK" \
         || log "  ⚠ 持久备份失败, 后续将无法自动还原二进制"
     fi
+    # P2-15 依赖断言: hexpatch 工作副本必须存在且非空, 否则 magiskboot 会静默失败,
+    # 随后把未 patch 的 UE_BAK 写回 /system, 误报"证书路径已改"。
     cp -f "$UE_ORIG_BAK" "$UE_BAK" 2>/dev/null || cp -f "$UE" "$UE_BAK"
-    "$MAGISKBOOT" hexpatch "$UE_BAK" \
-      2F73797374656D2F6574632F73656375726974792F6F746163657274732E7A6970 \
-      2F646174612F6675636B5F6F64646F5F6F74615F7465737463657274732E7A6970
+    HEXPATCH_USABLE=0
+    if [ ! -s "$UE_BAK" ]; then
+      log "  ⚠ hexpatch 工作副本为空/缺失, 跳过 hexpatch, 降级 bind"
+    else
+      HEXPATCH_USABLE=1
+      # P2-15: 捕获 magiskboot stdout/stderr 并经 log() 写入 ota.log —— 原先裸输出
+      # 只进终端, 出问题时事后无从查证是"没找到目标串"还是"ROM 版本不匹配"。
+      HP_OUT=$("$MAGISKBOOT" hexpatch "$UE_BAK" \
+        2F73797374656D2F6574632F73656375726974792F6F746163657274732E7A6970 \
+        2F646174612F6675636B5F6F64646F5F6F74615F7465737463657274732E7A6970 2>&1)
+      HP_RC=$?
+      [ -n "$HP_OUT" ] && log "  [hexpatch] $(printf '%s' "$HP_OUT" | tr '\n' ' ')"
+      [ "$HP_RC" -ne 0 ] && log "  ⚠ magiskboot hexpatch 返回 $HP_RC (可能未找到目标串)"
+      # 断言: hexpatch 后工作副本必须仍非空, 否则绝不能写到 /system/bin/update_engine
+      # (写成空文件等于硬砖, 且启动自愈会拿这个空文件当"原版"反复写回)。
+      [ -s "$UE_BAK" ] || { log "  🚨 hexpatch 后工作副本为空, 拒绝写回 /system"; HEXPATCH_USABLE=0; }
+    fi
     # remount/cp 失败(erofs 只读, Android15 常见)时 hexpatch 不生效, 降级 bind
-    if [ "$PATCHED_CERT_READY" -eq 1 ] && mount -o rw,remount /system 2>/dev/null && cp -f "$UE_BAK" "$UE"; then
+    # HEXPATCH_USABLE=0 时跳过写回, 防止把空/损坏的工作副本写进系统。
+    if [ "$HEXPATCH_USABLE" -eq 1 ] && [ "$PATCHED_CERT_READY" -eq 1 ] \
+       && mount -o rw,remount /system 2>/dev/null && cp -f "$UE_BAK" "$UE"; then
       log "  update_engine 证书路径已改为 $UE_PATCH_PATH"
       echo "patched at $(date '+%F %T') by vivo_ota.sh" > "$UE_PATCH_FLAG" 2>/dev/null
       UE_PATCHED=1; CERT_ACTIVE=1
@@ -1240,11 +1265,19 @@ attempt_install() {
   # = 引擎空闲(可); "Already processing an update" = 仍有抢占/残留 -> 提示并强制清一次;
   # "CleanupPreviousUpdateAction is running"(错误54) = VAB 收尾卡死, cancel/clear 都解不开,
   # 只能走下方 IDLE 闸收尾解锁。
+  # 2026-11-27 P2-13 (借鉴 V-ABHelper UpdateService.java:127-131 的 busy-as-resumable):
+  # "waiting for reboot" 是【上次更新已成功写入、待重启生效】的可恢复态, 不是占用/失败。
+  # 旧实现没有这个分支, 一旦 cancel 回显里出现该串就会被当作普通占用走 clear_ue_state,
+  # 把上一次成功写入的包清掉。现显式识别: 不强制清状态, 交 IDLE 闸 + 用户 FORCE 决定。
   OUT=$("$UPDATE_ENGINE_CLIENT" --cancel 2>&1); RC_C=$?
   log "  [probe] launch 前 --cancel: $OUT (RC=$RC_C)"
   case "$OUT" in
     *"CleanupPreviousUpdateAction is running"*)
       log "  ⚠ 引擎卡在 CleanupPreviousUpdateAction (等 markBootSuccessful), 强清 prefs 解不开, 交由 IDLE 闸收尾 ..."
+      ;;
+    *"waiting for reboot"*)
+      log "  ℹ 引擎报告 waiting for reboot: 上一次更新已应用待重启(可恢复态), 本次不强制清状态。"
+      log "     若确实要覆盖重刷, 请勾『强制重刷(FORCE)』; 否则建议先重启让上一次生效。"
       ;;
     *"Already processing"*)
       log "  ⚠ 探测到引擎仍被占用 (Already processing), 强制清理状态后重拉引擎 ..."
@@ -1618,8 +1651,16 @@ if [ "$LK_ENABLED" = "1" ]; then
     log "  注: 目标槽 $TARGET_SLOT 是否生效未经校验, LK 仍写入 $LK_DEV_NODE"
   fi
 
-  # 闸门②: 解除只读/写保护 (失败不阻断, 由 dd 自身报错兜底)
+  # 闸门②: 解除只读/写保护 + 回读确认 (P2-14, 借鉴 V-ABHelper manager.sh:249-256)
+  # 旧实现 setrw 后不校验, 只读分区上 dd 会静默失败/写不进, 靠末尾 sha256 回读才发现。
+  # 现在 setrw 后立刻 --getro: 仍返回 1 说明写保护没解开, 直接 die, 不做无谓的 dd。
   blockdev --setrw "$LK_DEV_NODE" 2>/dev/null
+  LK_RO=$(blockdev --getro "$LK_DEV_NODE" 2>/dev/null)
+  case "$LK_RO" in
+    1) die "LK 分区 $LK_DEV_NODE 仍为只读 (--setrw 未生效), 已中止写入" ;;
+    0|'') [ -n "$LK_RO" ] || log "  ⚠ blockdev --getro 不可用, 跳过只读校验(由 dd + sha256 回读兜底)" ;;
+    *)    log "  ⚠ blockdev --getro 返回异常值 '$LK_RO', 跳过只读校验" ;;
+  esac
 
   # 闸门③: 大小校验 (stat 取镜像大小, blockdev 取分区字节数)
   LK_SZ=$(stat -c %s "$LK_IMG" 2>/dev/null)
@@ -1636,6 +1677,16 @@ if [ "$LK_ENABLED" = "1" ]; then
       log "  ⚠ 镜像(${LK_SZ}B) 小于分区(${LK_PSZ}B): 尾部将残留旧 LK(LK 头部自带长度, 通常不影响启动)"
     fi
     log "  大小校验: 镜像=${LK_SZ}B 分区=${LK_PSZ}B"
+  fi
+
+  # 可选: 写前用 /dev/zero 清空整块分区 (P2-14, 借鉴 V-ABHelper manager.sh:256)。
+  # 默认关闭 —— vivo LK 头部自带长度, 尾部残留旧数据通常不影响启动, 与 fastboot 行为
+  # 一致; 清空整块在 dd 中途失败时会把原本可用的 LK 擦掉, 风险更大。仅在明确需要
+  # 彻底清除尾部旧数据时设 LK_ZERO_PAD=1 开启。
+  if [ "${LK_ZERO_PAD:-0}" = "1" ]; then
+    log "  LK_ZERO_PAD=1: 写前用 /dev/zero 清空 $LK_DEV_NODE"
+    dd if=/dev/zero of="$LK_DEV_NODE" bs=4096 2>/dev/null \
+      || log "  ⚠ /dev/zero 清空失败, 继续写镜像(由 sha256 回读判定)"
   fi
 
   log "刷入 LK: 将用户镜像写入 $LK_DEV_NODE"

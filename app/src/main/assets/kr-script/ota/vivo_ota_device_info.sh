@@ -8,7 +8,12 @@
 #  零风险只读: 只用 getprop / cat / ls / dumpsys, 不写任何状态。
 # ============================================================
 
-RED=$(printf '\033[31m'); YEL=$(printf '\033[33m'); GRN=$(printf '\033[32m'); RST=$(printf '\033[0m')
+# 颜色码复用 ota_common.sh 的 C_RED/C_YEL/C_GRN/C_RST (2026-11-27 P2-10):
+# 原先本脚本自带一份 RED/YEL/GRN/RST 字面量定义, 与共用库重复。共用库只定义变量与
+# 函数, 不 cd /、不设 trap、不启动后台进程, 对只读脚本无副作用。
+OTA_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+. "$OTA_SELF_DIR/ota_common.sh"
+RED="$C_RED"; YEL="$C_YEL"; GRN="$C_GRN"; RST="$C_RST"
 
 # root 探测: 可用 su 时通过 root_read/cat_file 读受限文件
 ROOT_OK=0

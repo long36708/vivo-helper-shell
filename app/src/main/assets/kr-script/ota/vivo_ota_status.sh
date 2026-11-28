@@ -45,8 +45,8 @@ POLL_SEC="${OTA_POLL_SEC:-2}"
 # 单例锁 / pid 文件
 LOCK_PID_FILE=/data/local/tmp/vivo_ota_status.pid
 
-# 普通提示: 终端着色 + 纯文本写文件
-put() { paint_line "$*"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "$*" >> "$UE_MIRROR"; }
+# put() / last_hit_line() / log_lines() / detect_engine_state() 已收拢到 ota_common.sh
+# (2026-11-27 P2-10/12), 本脚本直接复用, 不再各自复制一份。
 
 # ---------------------------------------------------------------------------
 # stop 子命令: 结束所有常驻监听实例 (含本次之前遗留的)
@@ -79,76 +79,8 @@ if [ -z "$ARG" ] && [ "$UE_LOG_WRITABLE" = "1" ]; then
   printf '%s%s%s\n' "$C_BLU" "[vivo_ota_status] $(date '+%F %T') 本次日志开始 (终端带颜色, 文件纯文本: $UE_MIRROR)" "$C_RST"
 fi
 
-# ---------------------------------------------------------------------------
-# 引擎状态判定: 综合 init.svc / 进程 / 落盘日志关键字
-#   输出到全局: UE_STATE (IDLE / UPDATING / NEED_REBOOT / SUSPENDED / CLEANUP / STOPPED / UNKNOWN)
-#              UE_STATE_RAW (最新日志尾部原文)
-# ---------------------------------------------------------------------------
-# 状态标记正则 (由"最后出现的标记"决定当前态, 不依赖顺序)
-# 注意: 不把裸 'processing' 收进来 —— 失败行 "Aborting processing due to failure" 会命中,
-#       把失败后的空档误报成"正在安装中"。
-UE_STATE_PAT='UPDATED_NEED_REBOOT|UPDATE_STATUS_IDLE|suspending|resuming|Downloading|Applying|Verifying|Finalizing|postinstall|ActionProcessor|overall progress|Completed .* operations'
-UE_PAT_CLEANUP='Boot completed, waiting on markBootSuccessful'
-
-# 取正则 $1 在文件 $2 中"最后一次命中"的行号 (无命中则输出空)
-last_hit_line() { grep -anE "$1" "$2" 2>/dev/null | tail -1 | cut -d: -f1; }
-# 文件行数 (取不到返回 0)
-log_lines() { [ -n "$1" ] && [ -f "$1" ] || { echo 0; return; }; wc -l < "$1" 2>/dev/null || echo 0; }
-
-detect_engine_state() {
-  UE_STATE=UNKNOWN
-  UE_STATE_RAW=""
-  SVC=$(getprop init.svc.update_engine 2>/dev/null)
-  if ! pgrep -x update_engine >/dev/null 2>&1 && [ "$SVC" != "running" ]; then
-    UE_STATE=STOPPED
-    return 0
-  fi
-  # 注意: update_engine_client 没有 --status flag (真机实测报 unknown command line flag),
-  #       状态只能从落盘日志 (/logdata/recovery/update_engine_log) 关键字判定。
-  L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
-  if [ -n "$L" ]; then
-    UE_STATE_RAW=$(tail -40 "$L" 2>/dev/null)
-    # ---- 判定原则: 看"最后出现的标记", 不是"整文件命中即返回" ----
-    # 同一份日志里历史会话会留下 IDLE / UPDATED_NEED_REBOOT / suspending 等行, 命中即返回
-    # 会把"正在安装"误报成空闲/待重启/暂停(与 vivo_ota.sh 的 record_log_anchor 同源坑)。
-    P_CL=$(last_hit_line "$UE_PAT_CLEANUP" "$L")
-    P_LAST=$(last_hit_line "$UE_STATE_PAT" "$L")
-    TL=$(log_lines "$L")
-    # 1) 卡死态: CleanupPreviousUpdateAction 的等待行仍停在尾部窗口内, 且其后没有任何更晚的标记。
-    #    (该行是 cleanup 会话的启动日志, 正常收尾完成后会被后续行推出窗口; 卡死时它停在末尾)
-    #    不是 IDLE! 此状态下引擎恒忙, 新安装会被 741 拒收, 需走『取消当前安装』收尾解锁。
-    if [ -n "$P_CL" ] && [ "$TL" -gt 0 ] 2>/dev/null \
-       && [ "$((TL - P_CL))" -lt 40 ] 2>/dev/null \
-       && { [ -z "$P_LAST" ] || [ "$P_CL" -gt "$P_LAST" ] 2>/dev/null; }; then
-      UE_STATE=CLEANUP
-    else
-      LAST_MARK=$(grep -anE "$UE_STATE_PAT" "$L" 2>/dev/null | tail -1)
-      if [ -z "$LAST_MARK" ]; then
-        UE_STATE=UNKNOWN
-      else
-        case "$LAST_MARK" in
-          *UPDATED_NEED_REBOOT*) UE_STATE=NEED_REBOOT ;;
-          *UPDATE_STATUS_IDLE*)  UE_STATE=IDLE ;;
-          *)
-            # 最后是活动/暂停标记: 暂停后引擎可能还会补几条收尾活动行, 故暂停态单独判 ——
-            # 只在"最后一次 suspending 晚于最后一次 resuming"时才算仍在暂停(旧实现整文件
-            # grep 'suspending', 恢复后仍会一直显示"已暂停")。
-            P_SUSP=$(last_hit_line 'suspending' "$L")
-            P_RESU=$(last_hit_line 'resuming' "$L")
-            if [ -n "$P_SUSP" ] && { [ -z "$P_RESU" ] || [ "$P_SUSP" -gt "$P_RESU" ] 2>/dev/null; }; then
-              UE_STATE=SUSPENDED
-            else
-              UE_STATE=UPDATING
-            fi
-            ;;
-        esac
-      fi
-    fi
-  fi
-  # 进程在跑但日志无明确态 -> 仍归为 UPDATING(保守)
-  [ "$UE_STATE" = "UNKNOWN" ] && UE_STATE=UPDATING
-  return 0
-}
+# 引擎状态判定 detect_engine_state() / UE_STATE_PAT / UE_PAT_CLEANUP 已收拢到
+# ota_common.sh (2026-11-27 P2-12), 输出契约不变: 全局 UE_STATE / UE_STATE_RAW。
 
 # 从最新日志里提取整体进度百分比 (引擎日志常见 "overall progress X%" / "progress Y")
 print_client_progress() {
@@ -262,9 +194,12 @@ if [ "$ARG" = "summary" ]; then
   fi
   # 定位最近一份小结: 保留最后一段 "──── 安装小结 ────" .. "DONE" 之间的内容
   # (不依赖 tac/tail -r, toybox 可能无这两者; 用 awk 记录每段, 取最后一段)
-  SUMMARY=$(awk '
-    /──── 安装小结 ────/ { buf=""; inblk=1 }
-    inblk { buf = buf $0 "\n"; if (/\[vivo_ota\] DONE$/) { lastbuf=buf; inblk=0 } }
+  # P2-11: 标记改为动态/宽松 —— 原 `/──── 安装小结 ────/` 依赖精确破折号数(生产者
+  # 实际是 12 个), 且 `/\[vivo_ota\] DONE$/` 硬编码 OTA_LOG_TAG, 覆盖 tag 时小结失效。
+  # 现: 标题只认"安装小结"子串; DONE 用调用方传入的 OTA_LOG_TAG 拼成固定串匹配。
+  SUMMARY=$(awk -v tag="$OTA_LOG_TAG DONE" '
+    /安装小结/ { buf=""; inblk=1 }
+    inblk { buf = buf $0 "\n"; if (index($0, tag) > 0) { lastbuf=buf; inblk=0 } }
     END { printf "%s", lastbuf }
   ' "$MIRROR" 2>/dev/null)
   if [ -z "$SUMMARY" ]; then

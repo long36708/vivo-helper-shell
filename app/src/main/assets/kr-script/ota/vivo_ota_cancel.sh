@@ -89,8 +89,7 @@ echo "已尝试取消并重启 update_engine。可用『查看安装进度』确
 # 界面按的是『隐藏』而非『退出』, 进程不会结束), 此时清锁会让下一次安装与之并发, 进而
 # 互相 pkill update_engine 打断正在进行的写入(2026-09-21 复盘的假失败)。
 # 这里只报告锁的持有情况, 让用户知道下一步安装会不会被拦、以及如何自救。
-INSTALL_LOCK_DIR=/data/local/tmp/vivo_ota_install.lock
-INSTALL_LOCK_PID="$INSTALL_LOCK_DIR/pid"
+# 锁路径常量 INSTALL_LOCK_DIR / INSTALL_LOCK_PID 已在 ota_common.sh 定义 (P2-10)。
 if [ -d "$INSTALL_LOCK_DIR" ]; then
   LOCK_PID=$(cat "$INSTALL_LOCK_PID" 2>/dev/null)
   echo ""

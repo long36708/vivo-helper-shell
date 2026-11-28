@@ -32,6 +32,11 @@ UE_MIRROR=/sdcard/ota.log
 UE_LOG_WRITABLE=0
 { [ -w /sdcard ] || mountpoint -q /sdcard 2>/dev/null; } && UE_LOG_WRITABLE=1
 
+# 安装单例锁路径 (2026-11-27 P2-10: vivo_ota.sh / vivo_ota_cancel.sh 各定义一份, 收拢至此)。
+# 注意: status.sh 的 vivo_ota_status.pid 是"进度监听"单例锁, 与安装锁无关, 保持独立。
+INSTALL_LOCK_DIR=/data/local/tmp/vivo_ota_install.lock
+INSTALL_LOCK_PID="$INSTALL_LOCK_DIR/pid"
+
 # ---------- 颜色 ----------
 C_RED=$(printf '\033[31m'); C_GRN=$(printf '\033[32m'); C_YEL=$(printf '\033[33m')
 C_BLU=$(printf '\033[34m'); C_CYN=$(printf '\033[36m'); C_RST=$(printf '\033[0m')
@@ -41,7 +46,8 @@ C_BLU=$(printf '\033[34m'); C_CYN=$(printf '\033[36m'); C_RST=$(printf '\033[0m'
 #   error/fail/失败/错误 -> 红; success/done/成功/完成 -> 绿; warn/⚠/警告 -> 黄
 # ⚠ 顺序即优先级: 先命中即返回。写警告文案时要避开"成功/完成"等词, 否则会被染绿。
 paint_line() {
-  line="$1"
+  local line="$1"
+  local lc
   lc=$(printf '%s' "$line" | tr 'A-Z' 'a-z')
   case "$lc" in
     *"overall progress"*|*"completed "*"operations"*)
@@ -76,6 +82,7 @@ color_stream() {
 #       模块名就叫 payload_consumer / payload_verifier / delta_performer, 几乎每行
 #       都含 payload, 用裸词等于不过滤。
 is_key_line() {
+  local lc
   lc=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
   case "$lc" in
     *"overall progress"*|*"completed "*"operations"*|\
@@ -107,6 +114,86 @@ filter_stream() {
 OTA_LOG_TAG="${OTA_LOG_TAG:-[vivo_ota]}"
 log() { paint_line "$OTA_LOG_TAG $*"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "$OTA_LOG_TAG $*" >> "$UE_MIRROR"; }
 die() { printf '%s%s%s\n' "$C_RED" "FAILED: $*" "$C_RST"; [ "$UE_LOG_WRITABLE" = "1" ] && echo "FAILED: $*" >> "$UE_MIRROR"; exit 1; }
+
+# 普通提示 (不带 OTA_LOG_TAG): 终端着色 + 纯文本镜像。原先 status.sh 与 ctrl.sh
+# 各定义一份 (前者 paint+镜像, 后者裸 printf %b), 2026-11-27 P2 收拢到此。
+put() { paint_line "$*"; [ "$UE_LOG_WRITABLE" = "1" ] && printf '%s\n' "$*" >> "$UE_MIRROR"; }
+
+# ---------- 日志判定工具 (P2-10/P2-12 从 status.sh / ctrl.sh 收拢) ----------
+# 取正则 $1 在文件 $2 中"最后一次命中"的行号 (无命中则输出空)
+last_hit_line() { grep -anE "$1" "$2" 2>/dev/null | tail -1 | cut -d: -f1; }
+# 文件行数 (取不到返回 0)
+log_lines() { [ -n "$1" ] && [ -f "$1" ] || { echo 0; return; }; wc -l < "$1" 2>/dev/null || echo 0; }
+# 纯无符号整数判定 (P2-11): 时间戳/补丁级别比较前必须先过这道闸, 避免 [ -lt ] 比较
+# 空串或非数字时的不确定行为 (toybox test 对非数字参数并非总是稳定返回假)。
+is_uint() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
+# 读取文件偏移 $2 起 $3 字节, 输出空格分隔的十进制字节 (P2-11): 优先 od -j/-N 批量读,
+# 老 toybox 不支持时回退 dd bs=1。原先 le2/le4 与 80 字节回扫都用 dd bs=1 逐字节。
+od_bytes() {
+  local f="$1" o="$2" n="$3" out
+  out=$(od -A n -t u1 -j "$o" -N "$n" "$f" 2>/dev/null | tr -s ' ')
+  [ -z "$out" ] && out=$(dd if="$f" bs=1 skip="$o" count="$n" 2>/dev/null | od -A n -t u1 | tr -s ' ')
+  printf '%s\n' "$out"
+}
+
+# 引擎状态正则。由"最后出现的标记"判定当前态, 不依赖顺序; 不收裸 processing
+# (失败行 "Aborting processing due to failure" 会命中, 把失败空档误报成安装中)。
+UE_STATE_PAT='UPDATED_NEED_REBOOT|UPDATE_STATUS_IDLE|suspending|resuming|Downloading|Applying|Verifying|Finalizing|postinstall|ActionProcessor|overall progress|Completed .* operations'
+UE_PAT_CLEANUP='Boot completed, waiting on markBootSuccessful'
+
+# 统一的引擎状态判定 (P2-12): 输出到全局 UE_STATE / UE_STATE_RAW。
+# 状态取值: IDLE / UPDATING / NEED_REBOOT / SUSPENDED / CLEANUP / STOPPED / UNKNOWN。
+# 原先 status.sh 有 detect_engine_state、ctrl.sh 有 ue_is_active 两套判定, 语义重复
+# 且阈值各异; 现统一到此, ctrl 的"是否进行中"也改由 UE_STATE 派生。
+detect_engine_state() {
+  local svc L P_CL P_LAST TL LAST_MARK P_SUSP P_RESU
+  UE_STATE=UNKNOWN
+  UE_STATE_RAW=""
+  svc=$(getprop init.svc.update_engine 2>/dev/null)
+  if ! pgrep -x update_engine >/dev/null 2>&1 && [ "$svc" != "running" ]; then
+    UE_STATE=STOPPED
+    return 0
+  fi
+  # update_engine_client 无 --status flag (真机实测 unknown command line flag),
+  # 状态只能从落盘日志关键字判定。
+  L=$(ls -t "$UE_LOG_DIR"/update_engine.* 2>/dev/null | head -1)
+  if [ -n "$L" ]; then
+    UE_STATE_RAW=$(tail -40 "$L" 2>/dev/null)
+    # 看"最后出现的标记"而非"整文件命中即返回", 避免历史会话终态误报空闲/待重启/暂停。
+    P_CL=$(last_hit_line "$UE_PAT_CLEANUP" "$L")
+    P_LAST=$(last_hit_line "$UE_STATE_PAT" "$L")
+    TL=$(log_lines "$L")
+    # 卡死态: cleanup 等待行停在尾部 40 行窗口内且其后无更晚标记 -> 恒忙, 新安装会被 741 拒。
+    if [ -n "$P_CL" ] && [ "$TL" -gt 0 ] 2>/dev/null \
+       && [ "$((TL - P_CL))" -lt 40 ] 2>/dev/null \
+       && { [ -z "$P_LAST" ] || [ "$P_CL" -gt "$P_LAST" ] 2>/dev/null; }; then
+      UE_STATE=CLEANUP
+    else
+      LAST_MARK=$(grep -anE "$UE_STATE_PAT" "$L" 2>/dev/null | tail -1)
+      if [ -z "$LAST_MARK" ]; then
+        UE_STATE=UNKNOWN
+      else
+        case "$LAST_MARK" in
+          *UPDATED_NEED_REBOOT*) UE_STATE=NEED_REBOOT ;;
+          *UPDATE_STATUS_IDLE*)  UE_STATE=IDLE ;;
+          *)
+            # 暂停态单独判: 仅当最后一次 suspending 晚于最后一次 resuming 才算仍在暂停。
+            P_SUSP=$(last_hit_line 'suspending' "$L")
+            P_RESU=$(last_hit_line 'resuming' "$L")
+            if [ -n "$P_SUSP" ] && { [ -z "$P_RESU" ] || [ "$P_SUSP" -gt "$P_RESU" ] 2>/dev/null; }; then
+              UE_STATE=SUSPENDED
+            else
+              UE_STATE=UPDATING
+            fi
+            ;;
+        esac
+      fi
+    fi
+  fi
+  # 进程在跑但日志无明确态 -> 仍归为 UPDATING (保守)
+  [ "$UE_STATE" = "UNKNOWN" ] && UE_STATE=UPDATING
+  return 0
+}
 
 # ---------- Boot Control HAL 探测 ----------
 # 探测 AIDL 服务名。**必须取「名字」列, 不能取序号列**:
