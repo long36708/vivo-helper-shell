@@ -6,7 +6,10 @@
 
     <group title="工具">
 <!--        <page link="https://zipbrowseronline.com/index.php" title="在线提取 OTA 包镜像 (boot/init_boot/lk)" />-->
-        <page link="https://1815192367.share.123pan.cn/123pan/xPMtVv-TyQQd" title="vivo-ota-tracker (APK 下载)" />
+        <page link="https://www.guangyapan.com/s/1973678837068669001_aeWn6wh3mcEVHNCC?code=long" title="vivo 助手 (网盘下载)" />
+        <page link="https://www.guangyapan.com/s/1973679678609641511_aeWn6wh3mcEVHNCC?code=long" title="vivo-ota-tracker-plus (网盘下载)" />
+        <page link="https://support.vivo.com.cn/service/authenticityCheck" title="vivo 设备真伪查询" />
+        <page link="https://www.guangyapan.com/s/1973683795671318551_aeWn6wh3mcEVHNCC" title="VivoCamera工具箱 (网盘下载)" />
     </group>
 
     <!-- 捐赠入口：微信收款码图片放 assets/kr-script/donate/，替换图片直接覆盖 wx_qcode.png -->
@@ -23,6 +26,7 @@
         <page link="https://kktoken.cc/sign-up?aff=uzrd" title="AI 公益站 KKToken (注册送 token)" />
         <page link="https://agentrouter.org/register?aff=NyFb" title="AI 公益站 AgentRouter (注册送 token)" />
         <page link="https://api.justwoker.icu/register?aff=ncgq" title="AI 公益站 JustWoker (注册送 token)" />
+        <page link="https://www.bigmodel.cn/invite?icode=1oR0uFyK57PAEpJHfPLemUjPr3uHog9F4g5tjuOUqno%3D" title="智谱开放平台 (注册送 2000 万 Tokens)" />
     </group>
 
     <group title="致谢">
