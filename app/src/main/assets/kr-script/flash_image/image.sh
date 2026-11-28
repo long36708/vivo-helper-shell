@@ -88,11 +88,35 @@ to_mb() {
     echo "$out"
 }
 
-# 文件大小, MB
+# 显示用 MB (四舍五入保留 2 位小数)。2026-11-28 修复: to_mb() 用 printf "%d" 向下取整,
+# 于是 3.996MiB 的分区(如 preloader_raw_a = 8184 扇区 = 4190208 字节)被显示成 "3MB",
+# 用户以为只有 3MB。展示保留 2 位小数 -> "4.00MB", 一眼看出接近 4MB。
+# ⚠ 只用于界面文案, 绝不参与容量比较/算术 —— 安全判定(镜像>分区、备份上限)必须用
+#   to_mb() 的向下取整整数, 否则 4.01MiB 的镜像会被当成 4.01 而通过 3.996MiB 分区的闸,
+#   dd 截断写入 = 变砖。
+to_mb_disp() {
+    local s="$1" out
+    case "$s" in ''|*[!0-9]*) echo 0.00; return 0 ;; esac
+    out=$(awk -v v="$s" 'BEGIN{printf "%.2f", v/1048576}' 2>/dev/null)
+    case "$out" in ''|*[!0-9.]*) out="" ;; esac
+    if [ -z "$out" ]; then
+        # 无 awk 时的兜底: 整数部分 + 2 位小数 (末 6 位截十进制再算, 仅展示用)
+        local i f
+        i=${s%??????}; case "$i" in ''|*[!0-9]*) i=0 ;; esac
+        f=${s#${s%??????}}   # 末 6 位
+        case "$f" in ''|*[!0-9]*) f=0 ;; esac
+        f=$(( (f * 100) / 1000000 ))
+        [ "$f" -lt 10 ] && out="${i}.0${f}" || out="${i}.${f}"
+    fi
+    echo "$out"
+}
+
+# 文件大小, MB。第 2 参数 disp=1 时用四舍五入(仅展示), 默认向下取整(安全/算术)。
 file_mb() {
     local s
     s=$(stat -c '%s' "$1" 2>/dev/null)
     [ -n "$s" ] || { [ -n "$BB" ] && s=$("$BB" stat -c '%s' "$1" 2>/dev/null); }
+    [ "${2:-}" = "disp" ] && { to_mb_disp "$s"; return 0; }
     to_mb "$s"
 }
 
@@ -147,13 +171,14 @@ resolve_part() {
     return 1
 }
 
-# 块设备大小, MB
+# 块设备大小, MB。第 2 参数 disp=1 时用四舍五入(仅展示), 默认向下取整(安全/算术)。
 part_size_mb() {
     local dev="$1" base real s
     s=$(blockdev --getsize64 "$dev" 2>/dev/null)
     [ -n "$s" ] || { [ -n "$BB" ] && s=$("$BB" blockdev --getsize64 "$dev" 2>/dev/null); }
     case "$s" in ''|*[!0-9]*) s="" ;; esac
     if [ -n "$s" ]; then
+        [ "${2:-}" = "disp" ] && { to_mb_disp "$s"; return 0; }
         to_mb "$s"
         return 0
     fi
@@ -164,7 +189,18 @@ part_size_mb() {
     s=""
     [ -r "/sys/class/block/$base/size" ] && read s < "/sys/class/block/$base/size" 2>/dev/null
     case "$s" in ''|*[!0-9]*) return 1 ;; esac
-    echo $(( s / 2048 ))   # sysfs 给的是 512 字节扇区数
+    # sysfs 给的是 512 字节扇区数; 1MB = 2048 扇区。
+    if [ "${2:-}" = "disp" ]; then
+        # 展示保留 2 位小数: 字节 = 扇区*512, 再交给 to_mb_disp。
+        # 用 awk 做乘法避开 32 位 shell 溢出(12GB super 的扇区数*512 会溢出);
+        # 无 awk 时退回整数四舍五入(仅展示, 精度略降)。
+        local m2
+        m2=$(awk -v v="$s" 'BEGIN{printf "%.2f", v*512/1048576}' 2>/dev/null)
+        case "$m2" in ''|*[!0-9.]*) m2=$(( (s + 1024) / 2048 )) ;; esac
+        echo "$m2"
+    else
+        echo $(( s / 2048 ))
+    fi
     return 0
 }
 
@@ -315,13 +351,14 @@ do_list() {
         is_blocked_part "$n" && continue
         dev=$(resolve_part "$n") || continue
         label="$n"
-        # 读不到大小就不显示, 不要显示成"不足 1MB"——那是真的小, 不是没读到
-        if mb=$(part_size_mb "$dev"); then
-            if [ "$mb" -gt 0 ]; then
-                label="$label 「${mb}MB」"
-            else
-                label="$label 「不足 1MB」"
-            fi
+        # 读不到大小就不显示, 不要显示成"0.00MB"——那是真的小, 不是没读到
+        # 2026-11-28: 展示用 2 位小数(disp), 避免 3.996MiB 分区显示成 3MB;
+        # 用 disp 值判定是否"不足 1MB", 这样 0.5MiB 显示 "0.50MB" 而非笼统的"不足 1MB"。
+        if dmb=$(part_size_mb "$dev" disp); then
+            case "$dmb" in
+                0.00|0) label="$label 「不足 1MB」" ;;
+                *)      label="$label 「${dmb}MB」" ;;
+            esac
         fi
         if [ -n "$SLOT_SUFFIX" ] && [ "$n" != "${n%$SLOT_SUFFIX}" ]; then
             label="$label ·当前槽"
@@ -339,7 +376,7 @@ do_backups() {
     if [ -d "$BACKUP_ROOT" ]; then
         for f in $(find "$BACKUP_ROOT" -type f -name '*.img' 2>/dev/null | sort -r); do
             n=${f%/*}; n=${n##*/}
-            mb=$(file_mb "$f")
+            mb=$(file_mb "$f" disp)
             echo "$f|$n · ${f##*/} 「${mb}MB」"
             found=1
         done
@@ -396,7 +433,9 @@ EOF
             echo "！拒绝备份：已选 ${total_mb}MB 超过预检上限 ${limit_mb}MB（可用空间的 80%）"
             echo "  占比最大的分区："
             sort -t'|' -k3 -n -r "$plan" 2>/dev/null | head -n 3 | while IFS='|' read -r pn pd pm; do
-                echo "    $pn  ${pm}MB"
+                # pm 是 floor 值(用于排序/预检); 展示用四舍五入值
+                pdmb=$(part_size_mb "$pd" disp 2>/dev/null); [ -n "$pdmb" ] || pdmb="$pm"
+                echo "    $pn  ${pdmb}MB"
             done
             echo "  请取消勾选其中一部分再试。"
             echo "  （列表弹窗里的「全选」会一次性选中所有分区，慎用）"
@@ -425,9 +464,11 @@ EOF
             continue
         fi
         out="$outdir/${n}_$(date +%Y%m%d%H%M%S).img"
-        echo "- 备份 $n（${mb}MB）-> $out"
+        # mb 是 plan 里的 floor 值; 展示用四舍五入
+        dmb=$(part_size_mb "$dev" disp 2>/dev/null); [ -n "$dmb" ] || dmb="$mb"
+        echo "- 备份 $n（${dmb}MB）-> $out"
         if dd if="$dev" of="$out" bs=1048576 2>&1; then
-            echo "  读出 $(file_mb "$out")MB"
+            echo "  读出 $(file_mb "$out" disp)MB"
         else
             echo "  ！失败，已删除不完整的文件"
             rm -f "$out"
@@ -449,9 +490,12 @@ do_flash() {
 
     mb=$(part_size_mb "$dev") || mb=0
     imb=$(file_mb "$img")
+    # 展示用四舍五入值; mb/imb(floor) 继续用于下方大小闸与写入, 不动安全判定
+    dmb=$(part_size_mb "$dev" disp 2>/dev/null); [ -n "$dmb" ] || dmb="$mb"
+    dimb=$(file_mb "$img" disp 2>/dev/null);   [ -n "$dimb" ] || dimb="$imb"
 
-    echo "- 目标分区：$n  ($dev, ${mb}MB)"
-    echo "- 镜像文件：$img  (${imb}MB)"
+    echo "- 目标分区：$n  ($dev, ${dmb}MB)"
+    echo "- 镜像文件：$img  (${dimb}MB)"
 
     kind=$(hazard_kind "$n")
     case "$kind" in
@@ -498,7 +542,7 @@ do_flash() {
         exit 1
     fi
     sync
-    echo "- 写入完毕（${imb}MB）"
+    echo "- 写入完毕（${dimb}MB）"
 
     do_reboot "$mode"
 }
