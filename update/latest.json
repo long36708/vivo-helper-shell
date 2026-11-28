@@ -1,12 +1,12 @@
 {
-  "tag": "v0.4.9",
-  "versionName": "0.4.9",
-  "versionCode": 97,
-  "apk": "com.longmo.vivo.helper-v0.4.9.97.-release.apk",
-  "apkSize": 13356515,
-  "sha256": "48b3d7b18f253b7189da2950fc602fcc89ea5db592a729e5795487be8678bb37",
-  "htmlUrl": "https://github.com/long36708/vivo-helper-shell/releases/tag/v0.4.9",
-  "notes": "**Full Changelog**: https://github.com/long36708/vivo-helper-shell/compare/v0.4.8...v0.4.9",
+  "tag": "v0.4.11",
+  "versionName": "0.4.11",
+  "versionCode": 107,
+  "apk": "com.longmo.vivo.helper-v0.4.11.107.-release.apk",
+  "apkSize": 13362720,
+  "sha256": "63af1a06778fd94d865a9954a9b7447288fa8bbadb45961ba8b43612178c0e68",
+  "htmlUrl": "https://github.com/long36708/vivo-helper-shell/releases/tag/v0.4.11",
+  "notes": "**Full Changelog**: https://github.com/long36708/vivo-helper-shell/compare/v0.4.9...v0.4.11",
   "mirrors": [
     "https://gh-proxy.com/",
     "https://ghfast.top/"
