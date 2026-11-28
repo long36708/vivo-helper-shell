@@ -39,6 +39,25 @@
             <set>sh "$START_DIR/kr-script/flash_image/image.sh" flash "$part" "$img" "$reboot_mode"</set>
         </action>
 
+        <action title="OTA 后批量刷入 (LK/init_boot/vendor_boot)" interruptible="false" confirm="true">
+            <desc>把 lk / init_boot / vendor_boot 中【已选择的镜像】刷进同一槽位，供 OTA 安装后配套刷入引导链。三个镜像可只填其中一个或两个（至少一个），未填的自动跳过，小结里会标明。默认刷到『OTA 目标槽』（当前运行槽的对位槽），可手动切到 _a / _b。都是启动链分区，写错即无法开机：刷前统一预检（存在/大小/稀疏/魔数），逐个写入后做 sha256 回读校验，任一失败立即停止且不自动重启。刷完请到『A/B 槽位管理』确认待生效槽后再手动重启。</desc>
+            <params>
+                <param name="slot" type="select" value="auto" required="true"
+                       title="目标槽位" desc="auto=OTA 目标槽(当前运行槽的对位槽)；也可强制指定 _a 或 _b">
+                    <option val="auto">自动 (OTA 目标槽)</option>
+                    <option val="_a">_a 槽</option>
+                    <option val="_b">_b 槽</option>
+                </param>
+                <param name="lk_img" type="file" suffix="img"
+                       title="LK 镜像 (可不填)" desc="lk 分区镜像 (lk_a / lk_b)。引导器本体，写坏会无法开机。不填则跳过" />
+                <param name="ib_img" type="file" suffix="img"
+                       title="init_boot 镜像 (可不填)" desc="init_boot 分区镜像 (init_boot_a / init_boot_b)。通常为已修补的 ramdisk。不填则跳过" />
+                <param name="vb_img" type="file" suffix="img"
+                       title="vendor_boot 镜像 (可不填)" desc="vendor_boot 分区镜像 (vendor_boot_a / vendor_boot_b)。不填则跳过" />
+            </params>
+            <set>sh "$START_DIR/kr-script/flash_image/image.sh" batch_flash "$slot" "$lk_img" "$ib_img" "$vb_img"</set>
+        </action>
+
         <action title="从备份还原" interruptible="false" confirm="true">
             <desc>从备份目录里挑一个历史镜像，写回它当初备份时所在的分区（分区名由备份路径反解，不会选错分区）。走与「刷入镜像」完全相同的三道检查和重启选项。列表来自当前备份目录（见下方「备份目录」分组），且在页面加载时生成，刚备份完需要退出本页再进来刷新。</desc>
             <params>

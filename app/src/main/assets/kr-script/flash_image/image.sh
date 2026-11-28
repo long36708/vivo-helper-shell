@@ -64,6 +64,7 @@ usage() {
     echo "  sh image.sh resetdir"
     echo "  sh image.sh backup <多选值>"
     echo "  sh image.sh flash <分区名> <镜像> [none|system|recovery|fastboot]"
+    echo "  sh image.sh batch_flash <auto|_a|_b> <lk.img> <init_boot.img> <vendor_boot.img>"
     echo "  sh image.sh restore <备份镜像路径> [none|system|recovery|fastboot]"
 }
 
@@ -562,6 +563,158 @@ do_restore() {
     do_flash "$n" "$img" "$mode"
 }
 
+# ------------------------- OTA 后批量刷入 -------------------------
+# 一次性把 lk / init_boot / vendor_boot 三个镜像刷进同一槽位(默认 OTA 目标槽=
+# 当前运行槽的对位槽), 每个都做 sha256 回读校验, 任一失败立即停止后续并禁止重启。
+# 这是独立手动入口(用户 OTA 装完后自己点), 不绑进 OTA 脚本 —— 避免把高危刷写
+# 与安装流程耦合。三个分区都是启动链, 写错即无法开机, 故全程保守。
+sha256_of() {
+    local f="$1" out
+    out=$(sha256sum "$f" 2>/dev/null | awk '{print $1}')
+    [ -n "$out" ] || { [ -n "$BB" ] && out=$("$BB" sha256sum "$f" 2>/dev/null | awk '{print $1}'); }
+    printf '%s' "$out"
+}
+
+# 回读分区前 $2 字节并算 sha256。$1=设备节点 $2=字节数。
+readback_sha256() {
+    local dev="$1" sz="$2" blks out
+    blks=$(( (sz + 4095) / 4096 ))
+    out=$(dd if="$dev" bs=4096 count="$blks" 2>/dev/null \
+          | head -c "$sz" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')
+    [ -n "$out" ] || { [ -n "$BB" ] && out=$(dd if="$dev" bs=4096 count="$blks" 2>/dev/null \
+          | head -c "$sz" 2>/dev/null | "$BB" sha256sum 2>/dev/null | awk '{print $1}'); }
+    printf '%s' "$out"
+}
+
+batch_flash() {
+    local slot_mode="$1" img_lk="$2" img_ib="$3" img_vb="$4"
+    local cur_slot target_slot suffix
+    # 1) 解析目标槽位
+    case "$slot_mode" in
+        auto|"")
+            cur_slot=$(getprop ro.boot.slot_suffix 2>/dev/null)
+            case "$cur_slot" in
+                _a) target_slot=_b ;;
+                _b) target_slot=_a ;;
+                *)  die "读不到当前槽位(ro.boot.slot_suffix='${cur_slot:-空}'), 非 A/B 或异常, 拒绝批量刷入(不猜分区)" ;;
+            esac
+            echo "- 槽位: 自动 -> 当前 $cur_slot, 目标(OTA 目标槽)=$target_slot" ;;
+        _a|_b)
+            target_slot="$slot_mode"
+            echo "- 槽位: 手动指定 $target_slot" ;;
+        *) die "非法槽位参数 '$slot_mode' (仅 auto/_a/_b)" ;;
+    esac
+    suffix="$target_slot"
+
+    # 2026-11-28: 三个镜像可只填部分(至少一个)。收集已填的分区到 $parts,
+    # 未填的跳过(小结里标明), 空串(全空)直接拒绝。
+    local n img dev mb imb imgsz imsum skipped=""
+    local parts=""
+    for n in lk init_boot vendor_boot; do
+        case "$n" in
+            lk)         img="$img_lk" ;;
+            init_boot)  img="$img_ib" ;;
+            vendor_boot) img="$img_vb" ;;
+        esac
+        if [ -n "$img" ]; then
+            parts="$parts $n"
+        else
+            skipped="$skipped $n"
+        fi
+    done
+    set -- $parts
+    [ "$#" -ge 1 ] || die "三个镜像都未填写: 至少指定一个 (lk / init_boot / vendor_boot)"
+
+    echo "============================================================"
+    echo "OTA 后批量刷入 -> $target_slot: 本次刷入:$parts"
+    [ -n "$skipped" ] && echo "  未填跳过:$skipped"
+    echo "  遇任一失败立即停止, 不会自动重启"
+    echo "============================================================"
+
+    # 2) 先做全部前置校验(不写任何东西), 避免刷到一半才发现某镜像有问题
+    set -- $parts
+    for n in "$@"; do
+        case "$n" in
+            lk)         img="$img_lk" ;;
+            init_boot)  img="$img_ib" ;;
+            vendor_boot) img="$img_vb" ;;
+        esac
+        [ -f "$img" ] || die "$n 镜像不存在: $img"
+        dev=$(resolve_part "$n$suffix") || die "$n$suffix 分区不存在"
+        imgsz=$(stat -c %s "$img" 2>/dev/null)
+        [ -n "$imgsz" ] || { [ -n "$BB" ] && imgsz=$("$BB" stat -c %s "$img" 2>/dev/null); }
+        case "$imgsz" in ''|*[!0-9]*) imgsz=0 ;; esac
+        [ "$imgsz" -gt 0 ] || die "$n 镜像为空或读不到大小: $img"
+        mb=$(part_size_mb "$dev") || mb=0
+        imb=$(file_mb "$img") || imb=0
+        if [ "$mb" -gt 0 ] && [ "$imb" -gt "$mb" ]; then
+            die "$n 镜像(${imb}MB) 大于 $n$suffix 分区(${mb}MB), 会截断写入"
+        fi
+        got=$(head_hex "$img" 0 4)
+        [ "$got" = "3aff26ed" ] && die "$n 镜像是稀疏镜像(sparse), 需先 simg2img 转换"
+        imsum=$(sha256_of "$img")
+        [ -n "$imsum" ] || die "无法计算 $n 镜像 sha256(缺 sha256sum), 无法做回读校验, 拒绝刷入"
+        echo "  ✓ $n$suffix 预检通过: 镜像=$img (${imgsz}B), 分区=$dev"
+    done
+
+    # 3) 逐个写入 + 回读校验, 遇错即停 (只处理已填的 $parts)
+    local rdsum dmb dimb
+    set -- $parts
+    for n in "$@"; do
+        case "$n" in
+            lk)         img="$img_lk" ;;
+            init_boot)  img="$img_ib" ;;
+            vendor_boot) img="$img_vb" ;;
+        esac
+        dev=$(resolve_part "$n$suffix") || die "$n$suffix 分区不存在"
+        imgsz=$(stat -c %s "$img" 2>/dev/null)
+        [ -n "$imgsz" ] || { [ -n "$BB" ] && imgsz=$("$BB" stat -c %s "$img" 2>/dev/null); }
+        case "$imgsz" in ''|*[!0-9]*) imgsz=0 ;; esac
+        imsum=$(sha256_of "$img")
+        dmb=$(part_size_mb "$dev" disp 2>/dev/null); [ -n "$dmb" ] || dmb="?"
+        dimb=$(file_mb "$img" disp 2>/dev/null); [ -n "$dimb" ] || dimb="?"
+
+        echo ""
+        echo "- 写入 $n$suffix ($dev, ${dmb}MB) <- ${dimb}MB 镜像"
+        # 魔数校验(与单分区 flash 一致)
+        local base exp nb got
+        base=${n%_a}; base=${base%_b}
+        exp=$(expected_magic "$base")
+        if [ -n "$exp" ]; then
+            nb=$(( ${#exp} / 2 ))
+            got=$(head_hex "$img" 0 "$nb")
+            if [ -n "$got" ] && [ "$got" != "$exp" ]; then
+                die "$n 镜像头不符(期望 $(magic_name "$base")=0x$exp, 实际 0x$got), 已中止, 请勿重启"
+            fi
+            [ -z "$got" ] && echo "  ⚠ 缺 od/xxd, 跳过 $n 魔数校验"
+        fi
+        unlock_rw "$dev"
+        echo "  正在写入…"
+        if ! dd if="$img" of="$dev" bs=1048576 2>&1; then
+            echo ""
+            echo "！$n 写入失败, 分区内容可能已损坏, 立即用备份镜像还原"
+            echo "  若为 Operation not permitted: 分区只读且未能解锁, 可重启到 Recovery/fastbootd 再刷"
+            die "批量刷入中止于 $n (写入失败), 请勿重启"
+        fi
+        sync
+        rdsum=$(readback_sha256 "$dev" "$imgsz")
+        if [ -n "$rdsum" ] && [ "$rdsum" = "$imsum" ]; then
+            echo "  ✅ $n 回读校验通过 (sha256 一致)"
+        else
+            echo "  🚨 $n 回读校验失败: 镜像=$imsum 回读=${rdsum:-<空>}"
+            die "批量刷入中止于 $n (回读校验失败, 写入可能未落地), 请勿重启"
+        fi
+    done
+
+    echo ""
+    echo "============================================================"
+    echo "✅ 批量刷入完成:$parts 均已写入 $target_slot 且回读通过"
+    [ -n "$skipped" ] && echo "   未填跳过:$skipped (未改动)"
+    echo "   本次【不自动重启】。重启前请到『A/B 槽位管理』确认待生效槽为 $target_slot,"
+    echo "   并确认 LK 与要启动的系统配套 —— 否则可能无法开机。"
+    echo "============================================================"
+}
+
 do_reboot() {
     local mode="$1" i
     case "$mode" in
@@ -639,6 +792,7 @@ case "$1" in
     resetdir) do_resetdir ;;
     backup)   do_backup "$2" ;;
     flash)   do_flash "$2" "$3" "$4" ;;
+    batch_flash) batch_flash "$2" "$3" "$4" "$5" ;;
     restore) do_restore "$2" "$3" ;;
     help|-h|"") usage ;;
     *) echo "！未知命令：$1"; usage; exit 1 ;;

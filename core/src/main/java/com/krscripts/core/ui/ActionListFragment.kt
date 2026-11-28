@@ -433,7 +433,12 @@ class ActionListFragment : Fragment(), PageLayoutRender.OnItemClickListener {
 
                         // 内置的参数输入界面
                         if (customRunner != true) {
-                            val isLongList = (action.params != null && action.params!!.size > 4)
+                            // 2026-11-28: >=4 (原 >4)。4 个参数的 action(如 OTA 后批量刷入:
+                            // 1 下拉 + 3 文件选择器)会落在 small 布局, 而 small 布局的
+                            // kr_params_center 是 FrameLayout 无滚动条, 文件选择器较高时会
+                            // 撑满弹窗、底部被裁切且无法滚动。4 个参数也走带 ScrollView 的
+                            // 全屏布局, 避免显示不全。
+                            val isLongList = (action.params != null && action.params!!.size >= 4)
                             val dialogView = LayoutInflater.from(context).inflate(
                                 if (isLongList) R.layout.kr_dialog_params else R.layout.kr_dialog_params_small,
                                 null
