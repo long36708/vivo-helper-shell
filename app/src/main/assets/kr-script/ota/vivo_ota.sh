@@ -820,8 +820,8 @@ run_client() {
 #   3) 日志出现 "Update successfully applied" / "SendPayloadApplicationComplete [0]" -> 成功 (0);
 #   4) 引擎回 IDLE 或进程退出但无成功标记 -> 以 prefs/update-result 判定
 #      (0=成功, 1=被回滚/失败, 缺省视为失败 89);
-#   5) 超时(默认 1800s=30 分钟, 覆盖 10GB 全量包 10~30 分钟耗时; OTA_WAIT_TIMEOUT 可覆盖)
-#      -> 不判失败(让用户看进度)。
+#   5) 超时(默认 3600s=60 分钟, 2026-11-28 从 1800s 上调; OTA_WAIT_TIMEOUT 可覆盖)
+#      -> 不判失败、不 die、不切槽/刷 LK/重启, 只提示让用户看进度后自行决定。
 WAIT_ERR_SEEN=""
 
 # 记录 apply 发起后的日志锚点: 只检查锚点【之后】的新日志, 避免把引擎启动阶段
@@ -864,7 +864,9 @@ new_log_grep() {
 }
 
 wait_engine_done() {
-  local timeout="${OTA_WAIT_TIMEOUT:-1800}" waited=0 L ur code
+  # 2026-11-28: 上限 1800→3600s。大包(10GB+)实测可能超过 30 分钟, 旧上限会在引擎
+  # 仍正常写入时误判超时; 超时只提示、不 die/不刷 LK/不重启(见超时分支与段8.6/段9)。
+  local timeout="${OTA_WAIT_TIMEOUT:-3600}" waited=0 L ur code
   while [ "$waited" -lt "$timeout" ] 2>/dev/null; do
     # (1) 失败归档 (仅本次新增)
     if [ -d "$UE_ERR_DIR" ]; then
@@ -935,10 +937,12 @@ wait_engine_done() {
     waited=$((waited + 5))
   done
   log "⚠ 等待引擎完成超时 (${timeout}s): 安装状态未知, 本次不按成功处理"
-  log "   → 不切槽(无法确认写入完成, 切槽后重启会被回滚清空)"
-  log "   → 请用『查看安装进度』确认; 若稍后日志出现 UPDATED_NEED_REBOOT,"
-  log "     再回来用『手动切启动槽』下发切槽, 然后重启"
-  log "   → 未确认写入前请勿把本次结果当作刷机完成"
+  # 2026-11-28: 超时只提示、不 die/不刷 LK/不重启 —— 引擎很可能仍在后台正常写入,
+  # 此时若 die 会让脚本提前结束(LK 不刷、小结不出), 用户误以为完成而手动重启 -> 变砖。
+  log "   → 引擎可能仍在后台写入, 本次【不切槽 / 不刷 LK / 不重启】, 脚本以提示结束"
+  log "   → 请用『查看安装进度』确认引擎终态; 若稍后出现 UPDATED_NEED_REBOOT,"
+  log "     再用『手动切启动槽』下发切槽、确认待生效槽后, 再手动刷 LK 并重启"
+  log "   → 未确认写入前切勿重启(新系统 + 旧 LK 会无法开机)"
   return 124
 }
 
@@ -1603,15 +1607,29 @@ fi
 LK_ENABLED=0
 [ "${7}" = "1" ] && LK_ENABLED=1
 LK_IMG="${LK_IMG:-${8}}"
+# 2026-11-28: 重启闸用 —— 仅当"勾选了 LK 且真正写入并回读通过"才置 1。
+# 脚本被中途杀掉/超时跳过/回读失败时它保持 0, 段9 据此禁止自动重启,
+# 杜绝"新系统 + 旧 LK"变砖。
+LK_DONE=0
 
 if [ "$LK_ENABLED" = "1" ]; then
-  # ── 闸门①[硬闸, 2026-11-27 恢复]: 写入未确认就绝不刷 LK ──
-  # 原"全拆"(2026-09-11)允许在 RC=124/失败码下也刷 LK, 但那会留下"LK 新、系统旧"
-  # 的变砖前提(引擎随后回滚清空目标槽)。INSTALL_WRITTEN 仅在 RC=0/1/248 时置 1,
-  # 超时(124)与任何失败码都会到这里 die, 不进 dd。
+  # ── 闸门①[硬闸, 2026-11-27 恢复 / 2026-11-28 超时分支调整] ──
+  # 写入未确认就绝不刷 LK。INSTALL_WRITTEN 仅在 RC=0/1/248 时置 1。
+  # 2026-11-28: 超时(RC=124)是"状态未知"而非失败, 按决策只提示、不 die ——
+  #   引擎可能仍在后台写入, 此时 die 会让脚本提前结束(LK 不刷、小结不出),
+  #   用户误以为完成而手动重启 -> "新系统 + 旧 LK" 变砖。改为跳过 LK、不中止脚本,
+  #   重启闸(段9)会继续拦住自动重启。
+  LK_SKIP=0
   if [ "$INSTALL_WRITTEN" != "1" ]; then
-    die "本次 OTA 写入未确认成功 (RC=$RC, INSTALL_WRITTEN=$INSTALL_WRITTEN), 已拒绝刷入 LK。请先用『查看安装进度』确认写入成功, 再单独刷 LK。"
+    if [ "$RC" = "124" ]; then
+      log "⏸ 本次等待超时(RC=124), 写入状态未知: 跳过刷 LK, 不中止脚本。"
+      log "   请用『查看安装进度』确认引擎终态, 再手动切槽 / 刷 LK / 重启。"
+      LK_SKIP=1
+    else
+      die "本次 OTA 写入未确认成功 (RC=$RC, INSTALL_WRITTEN=$INSTALL_WRITTEN), 已拒绝刷入 LK。请先用『查看安装进度』确认写入成功, 再单独刷 LK。"
+    fi
   fi
+  if [ "$LK_SKIP" != "1" ]; then
   # 切槽指令已下发但未经回读校验(SLOT_PENDING=1)属 B 方案常态, 不阻断刷 LK ——
   # LK 始终写入 lk$TARGET_SLOT(非当前运行侧), 不会因未回读而刷到运行槽。
   # 刷前 / 回读通过后 / 小结三处仍重申"LK 写入分区 ≠ 刷机包已刷入"。
@@ -1720,6 +1738,7 @@ if [ "$LK_ENABLED" = "1" ]; then
              | head -c "$LK_SZ" 2>/dev/null | sha256sum 2>/dev/null | cut -d' ' -f1)
     if [ -n "$RD_SUM" ] && [ "$RD_SUM" = "$IMG_SUM" ]; then
       LK_VERIFY=1
+      LK_DONE=1   # 2026-11-28: 写入且回读通过, 段9 才允许自动重启
       log "  ✅ 回读校验通过: 分区前 ${LK_SZ}B 与镜像 sha256 一致"
       log "  ⚠ 注意: LK 写入分区不等于刷机包已刷入 —— 是否刷入请以槽位状态判定为准"
     else
@@ -1732,6 +1751,7 @@ if [ "$LK_ENABLED" = "1" ]; then
     log "  ⚠ 无法计算镜像 sha256 或缺 LK_SZ, 跳过回读校验(需 sha256sum + stat 支持)"
     LK_VERIFY=-1
   fi
+  fi   # LK_SKIP != 1 (2026-11-28: 超时跳过刷 LK, 不进 dd)
 fi
 
 if [ "$5" = "1" ]; then
@@ -1744,6 +1764,12 @@ if [ "$5" = "1" ]; then
     log "   请先用『查看安装进度』确认引擎状态; 确认 UPDATED_NEED_REBOOT 后再手动重启。"
   elif [ "$SWITCH_BLOCK_REBOOT" = "1" ]; then
     log "🚨 切槽调用异常或 LK 回读校验未通过, 已阻止自动重启。请按上面提示处理后再重启。"
+  elif [ "$LK_ENABLED" = "1" ] && [ "$LK_DONE" != "1" ]; then
+    # 2026-11-28 重启闸: 勾了 LK 但没写入/没回读通过(脚本被打断、超时跳过、回读失败等),
+    # 此时自动重启 = 新系统 + 旧 LK = 无法开机。宁可不重启, 也不能赌。
+    log "🚨 本次勾选了『刷入 LK』但未确认写入成功(回读未通过或中途跳过), 已阻止自动重启。"
+    log "   请确认 LK 已写入目标槽(用『查看安装进度』/日志 LK_INFO 行核对), 再手动重启;"
+    log "   否则新系统配旧 bootloader 会无法开机。"
   elif [ "$SLOT_PENDING" = "1" ]; then
     # B 方案: 切槽结果未经校验 -> 不替用户按重启键
     log "⏸ 已跳过自动重启(勾了『完成后重启』也不自动执行)"
@@ -1768,6 +1794,11 @@ else
     log "   再用『辅助 → 手动切启动槽』下发切槽, 确认待生效槽后再重启。"
   elif [ "$INSTALL_WRITTEN" != "1" ]; then
     log "⚠ 本次写入未确认成功(RC=$RC), 请先按上方提示处理, 不要直接重启。"
+  elif [ "$LK_ENABLED" = "1" ] && [ "$LK_DONE" != "1" ]; then
+    # 2026-11-28: 即便不勾自动重启, 也不能给出"重启即可生效"的误导 ——
+    # 勾了 LK 却没确认写入, 手动重启就是"新系统 + 旧 LK"变砖。
+    log "🚨 本次勾选了『刷入 LK』但未确认写入成功, 请勿重启!"
+    log "   先用『查看安装进度』/日志 LK_INFO 确认 LK 已写入目标槽, 再手动重启。"
   elif [ "$SLOT_PENDING" = "1" ]; then
     log "⚠ 包已写入 $TARGET_SLOT, 但切槽结果未经校验。"
     log "   重启前请先到『A/B 槽位管理 → 查看当前槽位状态』确认『待生效槽』已是 $TARGET_SLOT;"
