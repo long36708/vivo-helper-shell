@@ -12,6 +12,14 @@
         <page link="https://www.guangyapan.com/s/1973683795671318551_aeWn6wh3mcEVHNCC" title="VivoCamera工具箱 (网盘下载)" />
     </group>
 
+    <group title="刷机工具更新日志">
+        <page link="https://chimeratool.cn/zh/download" title="奇美拉 (Chimera) 更新日志" />
+        <page link="https://www.hydradongle.com/download/software" title="九头蛇 (Hydra Dongle) 更新日志" />
+        <page link="https://unlocktool.net/download/" title="UnlockTool 更新日志" />
+        <page link="https://eftprodongle.com/download-setup" title="EFT Dongle 更新日志" />
+        <page link="https://z3x-team.com/category/news/" title="Pandora / Z3X 更新日志" />
+    </group>
+
     <!-- 捐赠入口：微信收款码图片放 assets/kr-script/donate/，替换图片直接覆盖 wx_qcode.png -->
     <group title="捐赠支持">
         <image title="微信打赏" desc="同一台手机无法扫码：请截图本收款码，再打开微信「扫一扫」→ 相册，选中截图即可打赏。感谢支持！">
